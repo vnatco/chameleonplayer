@@ -2,10 +2,13 @@ pub mod audio;
 pub mod commands;
 pub mod library;
 pub mod media;
+pub mod online;
 pub mod palette;
 pub mod settings;
+pub mod shell;
 pub mod tags;
 pub mod watcher;
+pub mod window;
 #[cfg(test)]
 mod testutil;
 
@@ -63,6 +66,10 @@ pub fn run() {
             commands::cover_palette,
             commands::palette_fallback,
             commands::image_preview,
+            commands::image_palette,
+            commands::covers_find,
+            commands::covers_download,
+            commands::album_set_cover,
             commands::tags_read,
             commands::tags_write,
             commands::player_load,
@@ -71,6 +78,19 @@ pub fn run() {
             commands::open_paths,
             commands::settings_get,
             commands::settings_set_ui,
+            commands::bootstrap,
+            commands::player_insert,
+            commands::player_queue,
+            commands::library_set_cover_source,
+            commands::library_update_track,
+            window::window_hit,
+            window::window_frame,
+            window::window_set_frame,
+            window::window_chrome,
+            window::window_set_on_top,
+            window::window_toggle_maximize,
+            window::window_show,
+            commands::shell_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Chameleon Player");
@@ -90,6 +110,7 @@ fn setup(app: &AppHandle) -> Result<(), String> {
 
     let settings_store = SettingsStore::new(&data_dir);
     let settings = settings_store.load();
+    library.set_cover_source(settings.cover_source);
 
     // Audio events go to the UI and to the Windows media overlay. The overlay
     // needs the audio handle for media keys, so it's attached afterwards.
@@ -103,6 +124,7 @@ fn setup(app: &AppHandle) -> Result<(), String> {
     audio.send(audio::Command::SetRepeat(settings.repeat));
 
     if let Some(window) = app.get_webview_window("main") {
+        app.manage(window::spawn_hit_test(app, window.clone()));
         match window.hwnd() {
             Ok(hwnd) => match media::spawn(hwnd.0, audio.clone(), library.clone()) {
                 Ok(handle) => {
@@ -123,7 +145,25 @@ fn setup(app: &AppHandle) -> Result<(), String> {
         }
     };
 
+    // Downloaded cover candidates are temporary.
+    let downloads = data_dir.join("covers").join("downloads");
+    if downloads.exists() {
+        if let Err(e) = std::fs::remove_dir_all(&downloads) {
+            log::warn!("can't clear old cover downloads: {e}");
+        }
+    }
+
+    shell::Shell::clear_fallbacks(&data_dir);
+    match shell::Shell::new(app, audio.clone(), &data_dir) {
+        Ok(s) => {
+            app.manage(s);
+        }
+        Err(e) => return Err(format!("Can't set up the tray and taskbar: {e}")),
+    }
+
     app.manage(AppState {
+        data_dir: data_dir.clone(),
+        media: media.clone(),
         audio,
         library: library.clone(),
         watcher: Mutex::new(watcher),

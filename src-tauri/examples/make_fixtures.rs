@@ -13,7 +13,16 @@ const RATE: u32 = 44_100;
 const SECONDS: u32 = 12;
 
 fn main() {
-    let out = PathBuf::from(std::env::args().nth(1).expect("usage: make_fixtures <output dir>"));
+    let out = PathBuf::from(std::env::args().nth(1).expect("usage: make_fixtures <output dir> [covers dir]"));
+    // Optional: a folder of real cover images, used for extra albums.
+    let real: Vec<PathBuf> = std::env::args()
+        .nth(2)
+        .map(|d| {
+            let mut v: Vec<PathBuf> = fs::read_dir(d).unwrap().flatten().map(|e| e.path()).filter(|p| image::open(p).is_ok()).collect();
+            v.sort();
+            v
+        })
+        .unwrap_or_default();
     fs::create_dir_all(&out).unwrap();
     let covers = out.join("_covers");
     fs::create_dir_all(&covers).unwrap();
@@ -28,6 +37,42 @@ fn main() {
         ("Folder Art", "Old Rips", "House", None, 392.0),
         ("Untitled", "Unknown Artist", "Demo", None, 440.0),
     ];
+
+    let names = [("The Travelled Road", "Evan Mack", "Classical"), ("Speeeedy EDM", "D.O.D & J-Trick", "Electro House"), ("Music Explore", "JHDAM", "Electro Pop"), ("Party Till We Die", "Timmy Trumpet", "Big Room"), ("Party Time", "Neon Sept", "Nu-Disco"), ("Lilac Island", "Mira Vale", "Dream Pop"), ("What Is Love 2016", "Lost Frequencies", "Dance"), ("Gradient", "Various", "Ambient")];
+    for (i, p) in real.iter().enumerate() {
+        let stem = p.file_stem().unwrap().to_string_lossy().to_lowercase();
+        let (album, artist, genre) = match stem.as_str() {
+            "travelled-road" => names[0],
+            "ping" => names[1],
+            "jhdam" => names[2],
+            "party-till" => names[3],
+            "party-time" => names[4],
+            "pink-tree" => names[5],
+            "what-is-love" => names[6],
+            _ => ("Real Cover", "Various", "Pop"),
+        };
+        let dir = out.join(sanitize(artist)).join(sanitize(album));
+        fs::create_dir_all(&dir).unwrap();
+        let png = covers.join(format!("real-{i}.png"));
+        image::open(p).unwrap().save(&png).unwrap();
+        for n in 1..=3u32 {
+            let path = dir.join(format!("{n:02} - {album} {n}.wav"));
+            fs::write(&path, tone(196.0 + i as f32 * 30.0 + n as f32 * 20.0)).unwrap();
+            let edit = TagEdit {
+                title: format!("{album} Part {n}"),
+                artist: artist.into(),
+                album: album.into(),
+                album_artist: String::new(),
+                genre: genre.into(),
+                year: Some(2016 + i as u32),
+                track_no: Some(n),
+                disc_no: None,
+                cover: CoverEdit::Replace { path: png.clone() },
+            };
+            tags::write(&path, &edit).unwrap();
+        }
+        println!("{}", dir.display());
+    }
 
     for (album, artist, genre, cover, base_hz) in albums {
         let dir = out.join(sanitize(artist)).join(sanitize(album));

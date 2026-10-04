@@ -16,6 +16,7 @@ pub struct Library {
     store: CoverStore,
     scanning: AtomicBool,
     cancel: AtomicBool,
+    cover_source: Mutex<scan::CoverSource>,
 }
 
 /// Clears the "scanning" flag however the scan ends.
@@ -33,7 +34,13 @@ impl Library {
         std::fs::create_dir_all(data_dir).map_err(|e| format!("Can't create {}: {e}", data_dir.display()))?;
         let conn = db::open(&data_dir.join("library.db")).map_err(|e| format!("Can't open library database: {e}"))?;
         let store = CoverStore::new(&data_dir.join("covers")).map_err(|e| format!("Can't create cover cache: {e}"))?;
-        Ok(Self { conn: Mutex::new(conn), store, scanning: AtomicBool::new(false), cancel: AtomicBool::new(false) })
+        Ok(Self {
+            conn: Mutex::new(conn),
+            store,
+            scanning: AtomicBool::new(false),
+            cancel: AtomicBool::new(false),
+            cover_source: Mutex::new(scan::CoverSource::default()),
+        })
     }
 
     /// Recompute cached palettes if the extraction algorithm changed since
@@ -46,18 +53,21 @@ impl Library {
         let files = self.with(db::cover_files)?;
         log::info!("palette algorithm changed; recomputing {} palettes", files.len());
         use rayon::prelude::*;
-        let results: Vec<(String, Result<String, String>)> = files
+        type Computed = (String, String, String);
+        let results: Vec<(String, Result<Computed, String>)> = files
             .par_iter()
             .map(|(hash, full)| {
-                let r = image::open(full)
-                    .map_err(|e| e.to_string())
-                    .and_then(|img| serde_json::to_string(&crate::palette::extract(&img)).map_err(|e| e.to_string()));
+                let r = image::open(full).map_err(|e| e.to_string()).and_then(|img| {
+                    let p = crate::palette::extract(&img);
+                    let (edge, glow) = p.tint();
+                    Ok((serde_json::to_string(&p).map_err(|e| e.to_string())?, edge, glow))
+                });
                 (hash.clone(), r)
             })
             .collect();
         for (hash, r) in results {
             match r {
-                Ok(json) => self.with(|c| db::set_palette(c, &hash, &json))?,
+                Ok((json, edge, glow)) => self.with(|c| db::set_palette(c, &hash, &json, &edge, &glow))?,
                 Err(e) => {
                     log::warn!("cached cover {hash} is unreadable ({e}); it will be re-read on the next scan");
                     self.with(|c| {
@@ -73,6 +83,24 @@ impl Library {
     /// Run a read or small write against the database.
     pub fn with<T>(&self, f: impl FnOnce(&Connection) -> db::Result<T>) -> Result<T, String> {
         f(&self.conn.lock()).map_err(|e| format!("Library database error: {e}"))
+    }
+
+    pub fn cover_source(&self) -> scan::CoverSource {
+        *self.cover_source.lock()
+    }
+
+    /// Change where covers come from. Returns true if it changed, in which
+    /// case every file should be re-read (see [`Library::invalidate_all`]).
+    pub fn set_cover_source(&self, source: scan::CoverSource) -> bool {
+        let mut cur = self.cover_source.lock();
+        let changed = *cur != source;
+        *cur = source;
+        changed
+    }
+
+    /// Force the next scan to re-read every file.
+    pub fn invalidate_all(&self) -> Result<(), String> {
+        self.with(|c| c.execute("UPDATE tracks SET mtime = 0", []).map(|_| ()))
     }
 
     pub fn is_scanning(&self) -> bool {
@@ -95,7 +123,8 @@ impl Library {
         let folders = self.with(db::folders)?;
         let mut summary = scan::Summary::default();
         for folder in folders.iter().filter(|f| only.is_none_or(|ids| ids.contains(&f.id))) {
-            scan::scan_folder(&self.conn, &self.store, folder.id, Path::new(&folder.path), &self.cancel, &mut summary, progress)?;
+            let opts = scan::ScanOptions { cancel: &self.cancel, cover_source: self.cover_source() };
+            scan::scan_folder(&self.conn, &self.store, folder.id, Path::new(&folder.path), &opts, &mut summary, progress)?;
             if summary.cancelled {
                 break;
             }
@@ -160,11 +189,7 @@ impl Library {
         track.mtime = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as i64).unwrap_or(0);
         track.size = meta.len() as i64;
 
-        let cover_bytes = match embedded {
-            Some(b) => Some((b, "embedded")),
-            None => path.parent().and_then(covers::find_in_folder).and_then(|p| std::fs::read(p).ok()).map(|b| (b, "folder")),
-        };
-        if let Some((bytes, source)) = cover_bytes {
+        if let Some((bytes, source)) = scan::cover_bytes(path, embedded, self.cover_source()) {
             let hash = covers::hash(&bytes);
             if !self.with(|c| db::has_cover(c, &hash))? {
                 let nc = self.store.process(&hash, &bytes)?;
@@ -174,6 +199,59 @@ impl Library {
             track.cover_source = Some(source.into());
         }
         self.with(|c| db::upsert_track(c, &track, scan::unix_now()))?;
+        self.prune_covers();
+        Ok(())
+    }
+
+    /// Update the library's copy of a track's tags and cover without writing
+    /// the file ("Save to library only", for read-only files). The values
+    /// hold until the file itself changes and is re-read.
+    pub fn update_track_only(&self, path: &Path, edit: &crate::tags::TagEdit) -> Result<(), String> {
+        let path_str = normalize_path(path).to_string_lossy().into_owned();
+        if self.with(|c| db::track_by_path(c, &path_str))?.is_none() {
+            return Err("This file isn't in your library, so there's nowhere to save the changes.".into());
+        }
+        let cover: Option<Option<(String, &str)>> = match &edit.cover {
+            crate::tags::CoverEdit::Keep => None,
+            crate::tags::CoverEdit::Remove => Some(None),
+            crate::tags::CoverEdit::Replace { path: img } => {
+                let bytes = std::fs::read(img).map_err(|e| format!("Can't read {}: {e}", img.display()))?;
+                let hash = covers::hash(&bytes);
+                if !self.with(|c| db::has_cover(c, &hash))? {
+                    let nc = self.store.process(&hash, &bytes)?;
+                    self.with(|c| db::insert_cover(c, &nc))?;
+                }
+                Some(Some((hash, "library")))
+            }
+        };
+        let t = |s: &str| s.trim().to_string();
+        let key = db::album_key(&edit.album_artist, &edit.artist, &edit.album);
+        self.with(|c| {
+            c.execute(
+                "UPDATE tracks SET title = ?2, artist = ?3, album = ?4, album_artist = ?5, album_key = ?6, genre = ?7,
+                        year = ?8, track_no = ?9, disc_no = ?10 WHERE path = ?1",
+                rusqlite::params![
+                    path_str,
+                    t(&edit.title),
+                    t(&edit.artist),
+                    t(&edit.album),
+                    t(&edit.album_artist),
+                    key,
+                    t(&edit.genre),
+                    edit.year,
+                    edit.track_no,
+                    edit.disc_no
+                ],
+            )?;
+            if let Some(cover) = &cover {
+                let (hash, source) = match cover {
+                    Some((h, s)) => (Some(h.as_str()), Some(*s)),
+                    None => (None, None),
+                };
+                c.execute("UPDATE tracks SET cover_hash = ?2, cover_source = ?3 WHERE path = ?1", rusqlite::params![path_str, hash, source])?;
+            }
+            Ok(())
+        })?;
         self.prune_covers();
         Ok(())
     }
@@ -190,16 +268,12 @@ impl Library {
             return Ok(Some((cover, palette)));
         }
         let (_, embedded) = scan::read(path, true)?;
-        let bytes = match embedded {
-            Some(b) => b,
-            None => match path.parent().and_then(covers::find_in_folder) {
-                Some(p) => std::fs::read(&p).map_err(|e| format!("Can't read {}: {e}", p.display()))?,
-                None => return Ok(None),
-            },
+        let Some((bytes, _)) = scan::cover_bytes(path, embedded, self.cover_source()) else {
+            return Ok(None);
         };
         let hash = covers::hash(&bytes);
         let nc = self.store.process(&hash, &bytes)?;
-        let cover = db::Cover { hash: nc.hash, full: nc.full, thumb: nc.thumb, width: nc.width, height: nc.height };
+        let cover = db::Cover { hash: nc.hash, full: nc.full, thumb: nc.thumb, width: nc.width, height: nc.height, edge: nc.edge, glow: nc.glow };
         Ok(Some((cover, nc.palette_json)))
     }
 
@@ -334,6 +408,48 @@ mod tests {
         let two = normalize_path(&album.join("two.wav"));
         let t = lib.with(|c| db::track_by_path(c, &two.to_string_lossy())).unwrap().unwrap();
         assert_eq!(t.title, "Edited In App");
+
+        // "Save to library only" changes the row, not the file, and survives
+        // an unchanged rescan.
+        let file_before = fs::read(&two).unwrap();
+        let mut edit = TagEdit {
+            title: "Library Title".into(),
+            artist: "Artist".into(),
+            album: "Ping".into(),
+            album_artist: String::new(),
+            genre: "House".into(),
+            year: Some(2020),
+            track_no: None,
+            disc_no: None,
+            cover: CoverEdit::Remove,
+        };
+        lib.update_track_only(&two, &edit).unwrap();
+        assert_eq!(fs::read(&two).unwrap(), file_before, "file untouched");
+        let t = lib.with(|c| db::track_by_path(c, &two.to_string_lossy())).unwrap().unwrap();
+        assert_eq!(t.title, "Library Title");
+        assert!(t.cover.is_none());
+        lib.scan(None, &|_| {}).unwrap();
+        let t = lib.with(|c| db::track_by_path(c, &two.to_string_lossy())).unwrap().unwrap();
+        assert_eq!(t.title, "Library Title", "unchanged file isn't re-read");
+        edit.cover = CoverEdit::Keep;
+        assert!(lib.update_track_only(&root.join("nope.wav"), &edit).is_err());
+
+        // Cover source preference: folder art wins over embedded art.
+        let one = normalize_path(&album.join("one.wav"));
+        let embedded_png = root.join("embedded.png");
+        image::RgbImage::from_pixel(32, 32, image::Rgb([250, 20, 20])).save(&embedded_png).unwrap();
+        let mut e = edit.clone();
+        e.title = "Renamed".into();
+        e.cover = CoverEdit::Replace { path: embedded_png };
+        tags::write(&one, &e).unwrap();
+        lib.scan(None, &|_| {}).unwrap();
+        let src = |lib: &Library| lib.with(|c| db::track_by_path(c, &one.to_string_lossy())).unwrap().unwrap().cover_source;
+        assert_eq!(src(&lib).as_deref(), Some("embedded"));
+        assert!(lib.set_cover_source(scan::CoverSource::Folder));
+        lib.invalidate_all().unwrap();
+        lib.scan(None, &|_| {}).unwrap();
+        assert_eq!(src(&lib).as_deref(), Some("folder"));
+        lib.set_cover_source(scan::CoverSource::Embedded);
 
         // An unreachable folder keeps its tracks.
         let moved = root.join("Moved");

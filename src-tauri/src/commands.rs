@@ -19,6 +19,8 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 pub struct AppState {
+    pub data_dir: PathBuf,
+    pub media: Arc<std::sync::OnceLock<crate::media::MediaHandle>>,
     pub audio: AudioHandle,
     pub library: Arc<Library>,
     pub watcher: Mutex<Option<FolderWatcher>>,
@@ -211,6 +213,134 @@ pub async fn image_preview(path: PathBuf) -> Res<String> {
     .map_err(|e| e.to_string())?
 }
 
+/// Palette of any image file, so the tag editor can preview a new cover's
+/// colors before saving.
+#[tauri::command]
+pub async fn image_palette(path: PathBuf) -> Res<crate::palette::Palette> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let img = image::open(&path).map_err(|e| format!("Can't open image: {e}"))?;
+        Ok(crate::palette::extract(&img))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+// ---- Shell (tray, taskbar, media overlay fallback) ---------------------------
+
+#[tauri::command]
+pub fn shell_update(state: State<'_, AppState>, shell: State<'_, crate::shell::Shell>, update: crate::shell::ShellUpdate) -> Res<()> {
+    let track = update.path.clone();
+    let fallback = shell.update(update)?;
+    if let (Some(track), Some(image), Some(media)) = (track, fallback, state.media.get()) {
+        media.fallback(PathBuf::from(track), image);
+    }
+    Ok(())
+}
+
+// ---- Online covers ---------------------------------------------------------
+
+#[tauri::command]
+pub async fn covers_find(artist: String, album: String, title: String) -> Res<Vec<crate::online::Candidate>> {
+    tauri::async_runtime::spawn_blocking(move || crate::online::find(&artist, &album, &title, 3)).await.map_err(|e| e.to_string())?
+}
+
+/// Download a candidate cover into the cache; returns its local path.
+#[tauri::command]
+pub async fn covers_download(state: State<'_, AppState>, url: String) -> Res<String> {
+    let dir = state.data_dir.join("covers").join("downloads");
+    tauri::async_runtime::spawn_blocking(move || crate::online::download(&url, &dir).map(|p| p.to_string_lossy().into_owned()))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AlbumCoverResult {
+    /// Tracks whose files now embed the cover.
+    pub written: usize,
+    /// Tracks updated in the library only (writing was off, or the file is
+    /// read-only).
+    pub library_only: usize,
+    pub failures: Vec<String>,
+    pub folder_image: Option<String>,
+}
+
+/// Give every track of an album a new cover. With `write_files`, the art is
+/// embedded in each file and saved as folder.jpg (unless one exists);
+/// otherwise, and for files that can't be written, only the library changes.
+#[tauri::command]
+pub async fn album_set_cover(app: AppHandle, state: State<'_, AppState>, album_key: String, image: PathBuf, write_files: bool) -> Res<AlbumCoverResult> {
+    let library = state.library.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || -> Res<AlbumCoverResult> {
+        let tracks = library.with(|c| db::tracks(c, &db::TrackFilter { album_key: Some(album_key), ..Default::default() }))?;
+        if tracks.is_empty() {
+            return Err("That album has no songs in the library.".into());
+        }
+        let mut out = AlbumCoverResult::default();
+        for t in &tracks {
+            let path = PathBuf::from(&t.path);
+            let edit = TagEdit {
+                title: t.title.clone(),
+                artist: t.artist.clone(),
+                album: t.album.clone(),
+                album_artist: t.album_artist.clone(),
+                genre: t.genre.clone(),
+                year: t.year.map(|y| y as u32),
+                track_no: t.track_no.map(|n| n as u32),
+                disc_no: t.disc_no.map(|n| n as u32),
+                cover: crate::tags::CoverEdit::Replace { path: image.clone() },
+            };
+            if write_files {
+                // Keep every existing tag as it is in the file; only the art changes.
+                let from_file = tags::read(&path).map(|i| TagEdit {
+                    title: i.title,
+                    artist: i.artist,
+                    album: i.album,
+                    album_artist: i.album_artist,
+                    genre: i.genre,
+                    year: i.year,
+                    track_no: i.track_no,
+                    disc_no: i.disc_no,
+                    cover: edit.cover.clone(),
+                });
+                match from_file.and_then(|e| tags::write(&path, &e)) {
+                    Ok(()) => {
+                        if let Err(e) = library.refresh_file(&path) {
+                            out.failures.push(format!("{}: saved, but the library couldn't update: {e}", t.title));
+                        }
+                        out.written += 1;
+                        continue;
+                    }
+                    Err(e) => log::warn!("album cover: can't write {}: {e}; saving to library only", t.path),
+                }
+            }
+            match library.update_track_only(&path, &edit) {
+                Ok(()) => out.library_only += 1,
+                Err(e) => out.failures.push(format!("{}: {e}", t.title)),
+            }
+        }
+        if write_files {
+            if let Some(dir) = PathBuf::from(&tracks[0].path).parent() {
+                if library::covers::find_in_folder(dir).is_none() {
+                    let target = dir.join("folder.jpg");
+                    let saved = image::open(&image)
+                        .map_err(|e| e.to_string())
+                        .and_then(|img| img.to_rgb8().save_with_format(&target, image::ImageFormat::Jpeg).map_err(|e| e.to_string()));
+                    match saved {
+                        Ok(()) => out.folder_image = Some(target.to_string_lossy().into_owned()),
+                        Err(e) => out.failures.push(format!("folder.jpg: {e}")),
+                    }
+                }
+            }
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    let _ = app.emit("library-changed", LibraryChanged { paths: vec![] });
+    Ok(result)
+}
+
 // ---- Tags ------------------------------------------------------------------
 
 #[tauri::command]
@@ -290,6 +420,104 @@ pub fn player(state: State<'_, AppState>, command: PlayerCommand) -> Res<()> {
 #[tauri::command]
 pub fn player_status(state: State<'_, AppState>) -> audio::Status {
     state.audio.status()
+}
+
+/// Insert tracks into the queue at `at` (e.g. right after the current track)
+/// and optionally play the first of them.
+#[tauri::command]
+pub fn player_insert(state: State<'_, AppState>, tracks: Vec<Track>, at: usize, play: bool) {
+    state.audio.send(Command::Insert { tracks, at, play });
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueItem {
+    pub path: String,
+    pub id: Option<i64>,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub duration: f64,
+    pub cover: Option<db::Cover>,
+}
+
+/// The play queue with display details. Library tracks come from the
+/// database; files from outside it are read for their tags.
+#[tauri::command]
+pub async fn player_queue(state: State<'_, AppState>) -> Res<Vec<QueueItem>> {
+    let (library, queue) = (state.library.clone(), state.audio.queue());
+    tauri::async_runtime::spawn_blocking(move || {
+        queue
+            .into_iter()
+            .map(|t| {
+                let path = t.path.to_string_lossy().into_owned();
+                if let Some(row) = library.with(|c| db::track_by_path(c, &path))? {
+                    return Ok(QueueItem {
+                        path,
+                        id: Some(row.id),
+                        title: row.title,
+                        artist: row.artist,
+                        album: row.album,
+                        duration: row.duration,
+                        cover: row.cover,
+                    });
+                }
+                let (title, artist, album, duration) = match scan::read(&t.path, false) {
+                    Ok((n, _)) => (n.title, n.artist, n.album, n.duration),
+                    Err(_) => (t.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(), String::new(), String::new(), 0.0),
+                };
+                Ok(QueueItem { path, id: None, title, artist, album, duration, cover: None })
+            })
+            .collect()
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Everything the UI needs on startup, in one round trip.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Bootstrap {
+    pub settings: Settings,
+    pub status: audio::Status,
+    pub stats: db::Stats,
+    pub scanning: bool,
+    pub fallback: crate::palette::Palette,
+}
+
+#[tauri::command]
+pub fn bootstrap(state: State<'_, AppState>) -> Res<Bootstrap> {
+    Ok(Bootstrap {
+        settings: state.settings.lock().clone(),
+        status: state.audio.status(),
+        stats: state.library.with(db::stats)?,
+        scanning: state.scan_job.load(Ordering::SeqCst),
+        fallback: crate::palette::fallback(),
+    })
+}
+
+/// Change where covers come from and re-read the library with it.
+#[tauri::command]
+pub fn library_set_cover_source(app: AppHandle, state: State<'_, AppState>, source: scan::CoverSource) -> Res<()> {
+    update_settings(&state, |s| s.cover_source = source)?;
+    if state.library.set_cover_source(source) {
+        state.library.invalidate_all()?;
+        if !start_scan(&app, None) {
+            log::info!("scan busy; cover source change applies on the next scan");
+        }
+    }
+    Ok(())
+}
+
+/// "Save to library only": update the library's copy of a track's tags (and
+/// optionally its cover) without touching the file, for read-only files.
+#[tauri::command]
+pub async fn library_update_track(app: AppHandle, state: State<'_, AppState>, path: PathBuf, edit: TagEdit) -> Res<()> {
+    let library = state.library.clone();
+    let p = library::normalize_path(&path);
+    tauri::async_runtime::spawn_blocking(move || library.update_track_only(&p, &edit)).await.map_err(|e| e.to_string())??;
+    let _ = app.emit("library-changed", LibraryChanged { paths: vec![library::normalize_path(&path).to_string_lossy().into_owned()] });
+    Ok(())
 }
 
 /// Play files and/or folders (drag & drop, "Open With", command line).

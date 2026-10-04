@@ -1,45 +1,41 @@
-// Typed bridge to the Rust backend (src-tauri/src/commands.rs).
+// Typed bridge to the Rust backend (src-tauri/src/commands.rs, window.rs).
 
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-// ---- Types (mirror the Rust structs) ----------------------------------------
-
-export interface Swatch {
-  hex: string;
-  l: number;
-  c: number;
-  h: number;
+export type Rgb = [number, number, number];
+export interface Sides<T> {
+  t: T;
+  r: T;
+  b: T;
+  l: T;
 }
 
-export interface Sides {
-  top: Swatch;
-  right: Swatch;
-  bottom: Swatch;
-  left: Swatch;
-}
-
+/** A finished palette, computed once per cover by the backend (spec F). */
 export interface Palette {
   scheme: "dark" | "light";
-  dominant: Swatch;
-  vibrant: Swatch;
-  muted: Swatch;
-  edges: Sides;
-  glow: Sides;
-  /** Three stops per side: top/bottom run left to right, left/right top to bottom. */
-  glowStops: { top: Swatch[]; right: Swatch[]; bottom: Swatch[]; left: Swatch[] };
+  gray: boolean;
+  fallback: boolean;
   roles: {
-    background: Swatch;
-    surface: Swatch;
-    surfaceRaised: Swatch;
-    border: Swatch;
-    text: Swatch;
-    textSubtle: Swatch;
-    accent: Swatch;
-    onAccent: Swatch;
+    bg: Rgb;
+    surface: Rgb;
+    surface2: Rgb;
+    accent: Rgb;
+    onAccent: Rgb;
+    text: Rgb;
+    subtle: Rgb;
+    edge: Rgb;
   };
-  swatches: (Swatch & { population: number })[];
-  fromCover: boolean;
+  glow: Sides<Rgb>;
+  glowA: Sides<number>;
+  /** Three segments per side: top/bottom run left to right, left/right top to bottom. */
+  glowStops: Sides<[Rgb, Rgb, Rgb]>;
+  dominant: Rgb;
+  vibrant: Rgb;
+  muted: Rgb;
+  swatches: Rgb[];
+  ratios: { text: number; subtle: number; accent: number; onAccent: number };
+  fixes: string[];
 }
 
 export interface Cover {
@@ -48,6 +44,9 @@ export interface Cover {
   thumb: string;
   width: number;
   height: number;
+  /** `#rrggbb` edge border and bottom glow, for small thumbnails. */
+  edge: string;
+  glow: string;
 }
 
 export interface TrackRow {
@@ -69,7 +68,7 @@ export interface TrackRow {
   bitDepth: number | null;
   format: string;
   cover: Cover | null;
-  coverSource: "embedded" | "folder" | null;
+  coverSource: "embedded" | "folder" | "library" | null;
 }
 
 export interface AlbumRow {
@@ -87,6 +86,8 @@ export interface NamedCount {
   trackCount: number;
   albumCount: number;
   cover: Cover | null;
+  /** Up to four distinct album covers. */
+  covers: Cover[];
 }
 
 export interface Stats {
@@ -118,8 +119,19 @@ export interface Track {
   duration: number | null;
 }
 
+export interface QueueItem {
+  path: string;
+  id: number | null;
+  title: string;
+  artist: string;
+  album: string;
+  duration: number;
+  cover: Cover | null;
+}
+
 export type Repeat = "off" | "all" | "one";
 export type PlayState = "stopped" | "playing" | "paused";
+export type CoverSource = "embedded" | "folder" | "embeddedOnly";
 
 export interface Status {
   state: PlayState;
@@ -130,6 +142,7 @@ export interface Status {
   volume: number;
   repeat: Repeat;
   queueLen: number;
+  queueId: number;
 }
 
 export type PlayerEvent =
@@ -144,6 +157,9 @@ export interface ScanProgress {
   found: number;
   total: number;
   processed: number;
+  withCover: number;
+  noCover: number;
+  file: string;
 }
 
 export interface ScanSummary {
@@ -196,10 +212,49 @@ export interface TagEdit {
   cover: CoverEdit;
 }
 
+export interface Candidate {
+  release: string;
+  artist: string;
+  year: string | null;
+  score: number;
+  thumb: string;
+  image: string;
+  label: string;
+}
+
+export interface AlbumCoverResult {
+  written: number;
+  libraryOnly: number;
+  failures: string[];
+  folderImage: string | null;
+}
+
 export interface Settings {
   volume: number;
   repeat: Repeat;
+  coverSource: CoverSource;
   ui: Record<string, unknown>;
+}
+
+export interface Bootstrap {
+  settings: Settings;
+  status: Status;
+  stats: Stats;
+  scanning: boolean;
+  fallback: Palette;
+}
+
+export interface Rect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export interface Frame extends Rect {
+  scale: number;
+  work: Rect;
+  maximized: boolean;
 }
 
 export type PlayerCommand =
@@ -210,9 +265,9 @@ export type PlayerCommand =
   | { type: "setRepeat"; repeat: Repeat }
   | { type: "setMeter"; enabled: boolean };
 
-// ---- Commands -----------------------------------------------------------------
-
 export const api = {
+  bootstrap: () => invoke<Bootstrap>("bootstrap"),
+
   stats: () => invoke<Stats>("library_stats"),
   folders: () => invoke<Folder[]>("library_folders"),
   addFolder: (path: string) => invoke<Folder>("library_add_folder", { path }),
@@ -225,25 +280,38 @@ export const api = {
   genres: (search?: string) => invoke<NamedCount[]>("library_genres", { search }),
   tracks: (filter: TrackFilter = {}) => invoke<TrackRow[]>("library_tracks", { filter }),
   trackByPath: (path: string) => invoke<TrackRow | null>("library_track_by_path", { path }),
+  setCoverSource: (source: CoverSource) => invoke<void>("library_set_cover_source", { source }),
+  updateTrackOnly: (path: string, edit: TagEdit) => invoke<void>("library_update_track", { path, edit }),
 
   coverForPath: (path: string) => invoke<CoverInfo>("cover_for_path", { path }),
   coverPalette: (hash: string) => invoke<Palette>("cover_palette", { hash }),
-  paletteFallback: () => invoke<Palette>("palette_fallback"),
   imagePreview: (path: string) => invoke<string>("image_preview", { path }),
+  imagePalette: (path: string) => invoke<Palette>("image_palette", { path }),
+  findCovers: (artist: string, album: string, title: string) => invoke<Candidate[]>("covers_find", { artist, album, title }),
+  downloadCover: (url: string) => invoke<string>("covers_download", { url }),
+  albumSetCover: (albumKey: string, image: string, writeFiles: boolean) =>
+    invoke<AlbumCoverResult>("album_set_cover", { albumKey, image, writeFiles }),
 
   readTags: (path: string) => invoke<TagInfo>("tags_read", { path }),
   writeTags: (path: string, edit: TagEdit) => invoke<void>("tags_write", { path, edit }),
 
   load: (queue: Track[], index: number, autoplay = true) => invoke<void>("player_load", { queue, index, autoplay }),
+  insert: (tracks: Track[], at: number, play: boolean) => invoke<void>("player_insert", { tracks, at, play }),
+  queue: () => invoke<QueueItem[]>("player_queue"),
   player: (command: PlayerCommand) => invoke<void>("player", { command }),
   status: () => invoke<Status>("player_status"),
   openPaths: (paths: string[]) => invoke<number>("open_paths", { paths }),
 
-  settings: () => invoke<Settings>("settings_get"),
   setUiSettings: (ui: Record<string, unknown>) => invoke<void>("settings_set_ui", { ui }),
-};
 
-// ---- Events -------------------------------------------------------------------
+  windowHit: (rects: Rect[]) => invoke<void>("window_hit", { rects }),
+  windowFrame: () => invoke<Frame>("window_frame"),
+  windowSetFrame: (r: Rect) => invoke<Frame>("window_set_frame", { ...r }),
+  windowChrome: (library: boolean, mica: boolean) => invoke<void>("window_chrome", { library, mica }),
+  windowOnTop: (on: boolean) => invoke<void>("window_set_on_top", { on }),
+  windowToggleMaximize: () => invoke<Frame>("window_toggle_maximize"),
+  windowShow: () => invoke<void>("window_show"),
+};
 
 export const events = {
   player: (cb: (e: PlayerEvent) => void): Promise<UnlistenFn> => listen<PlayerEvent>("player", (e) => cb(e.payload)),
@@ -252,14 +320,26 @@ export const events = {
   libraryChanged: (cb: (paths: string[]) => void) =>
     listen<{ paths: string[] }>("library-changed", (e) => cb(e.payload.paths)),
   appError: (cb: (message: string) => void) => listen<string>("app-error", (e) => cb(e.payload)),
+  pointerInside: (cb: (inside: boolean) => void) =>
+    listen<{ inside: boolean }>("pointer-inside", (e) => cb(e.payload.inside)),
 };
 
-// ---- Helpers ------------------------------------------------------------------
+/** URL for a cached cover file on disk (memoized; called for every thumbnail). */
+const urlCache = new Map<string, string>();
+export function coverUrl(path: string): string {
+  let u = urlCache.get(path);
+  if (!u) {
+    u = convertFileSrc(path);
+    urlCache.set(path, u);
+  }
+  return u;
+}
 
-/** URL for a cached cover file on disk. */
-export const coverUrl = (path: string) => convertFileSrc(path);
-
-export const toTrack = (t: TrackRow): Track => ({ id: t.id, path: t.path, duration: t.duration || null });
+export const toTrack = (t: { id: number | null; path: string; duration: number }): Track => ({
+  id: t.id,
+  path: t.path,
+  duration: t.duration || null,
+});
 
 export function formatTime(secs: number | null | undefined): string {
   if (secs == null || !isFinite(secs)) return "-:--";
@@ -271,3 +351,7 @@ export function formatTime(secs: number | null | undefined): string {
 }
 
 export const fileName = (path: string) => path.split(/[\\/]/).pop() ?? path;
+
+/** First letter or digit, for typographic placeholders. */
+export const mono = (t: string | null | undefined) =>
+  (t || "?").replace(/[^\p{L}\p{N}]/gu, "").charAt(0).toUpperCase() || "?";

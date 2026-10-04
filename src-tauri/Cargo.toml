@@ -15,7 +15,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["protocol-asset"] }
+tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-single-instance = "2"
@@ -35,6 +35,10 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 blake3 = "1"
 base64 = "0.22"
 
+# Online cover lookup (MusicBrainz + Cover Art Archive)
+ureq = { version = "3", features = ["json"] }
+urlencoding = "2"
+
 # Windows media overlay (SMTC) + media keys
 souvlaki = "0.8"
 
@@ -45,6 +49,19 @@ notify = "8"
 crossbeam-channel = "0.5"
 parking_lot = "0.12"
 log = "0.4"
+
+# Window shaping: atomic moves, DWM corners, work area
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_System_Com",
+    "Win32_System_Registry",
+] }
 
 [profile.release]
 codegen-units = 1

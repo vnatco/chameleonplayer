@@ -46,7 +46,9 @@ impl CoverStore {
             return Err("Image has no pixels".into());
         }
 
-        let palette_json = serde_json::to_string(&palette::extract(&img)).map_err(|e| e.to_string())?;
+        let pal = palette::extract(&img);
+        let (edge, glow) = pal.tint();
+        let palette_json = serde_json::to_string(&pal).map_err(|e| e.to_string())?;
 
         // Keep the original bytes when they are already a sensible size and a
         // format the webview shows natively; otherwise re-encode.
@@ -73,6 +75,8 @@ impl CoverStore {
             width,
             height,
             palette_json,
+            edge,
+            glow,
         })
     }
 }
@@ -177,7 +181,7 @@ mod tests {
         assert_eq!((c.width, c.height), (600, 600));
         let thumb = image::open(&c.thumb).unwrap();
         assert_eq!((thumb.width(), thumb.height()), (THUMB_SIZE, THUMB_SIZE));
-        assert!(c.palette_json.contains("\"edges\""));
+        assert!(c.palette_json.contains("\"glowStops\""));
 
         let big = png_bytes(2000, 2000);
         let c = store.process(&hash(&big), &big).unwrap();

@@ -12,12 +12,13 @@ use std::path::{Path, PathBuf};
 pub struct Settings {
     pub volume: f32,
     pub repeat: Repeat,
+    pub cover_source: crate::library::scan::CoverSource,
     pub ui: serde_json::Map<String, serde_json::Value>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { volume: 0.8, repeat: Repeat::Off, ui: serde_json::Map::new() }
+        Self { volume: 0.8, repeat: Repeat::Off, cover_source: Default::default(), ui: serde_json::Map::new() }
     }
 }
 

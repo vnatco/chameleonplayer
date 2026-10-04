@@ -1,0 +1,229 @@
+/* Global styles. Every color is a palette token; nothing is fixed except
+   caption-close red (spec H). */
+
+@import "@fontsource/figtree/300.css";
+@import "@fontsource/figtree/400.css";
+@import "@fontsource/figtree/500.css";
+@import "@fontsource/figtree/600.css";
+@import "@fontsource/jetbrains-mono/400.css";
+
+:root {
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-io: cubic-bezier(0.65, 0, 0.35, 1);
+  --font: "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", Figtree, system-ui, sans-serif;
+  --font-display: "Segoe UI Variable Display", "Segoe UI", Figtree, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+  color-scheme: dark;
+}
+:root[data-scheme="light"] {
+  color-scheme: light;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  /* The window is transparent around the sleeve. */
+  background: transparent;
+  overflow: hidden;
+}
+body {
+  font-family: var(--font);
+  color: var(--ch-text);
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  cursor: default;
+}
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+button,
+input,
+select {
+  font: inherit;
+  color: inherit;
+}
+button {
+  -webkit-app-region: no-drag;
+}
+:focus {
+  outline: none;
+}
+:focus-visible {
+  outline: 2px solid var(--ch-accent);
+  outline-offset: 2px;
+}
+input::placeholder {
+  color: var(--ch-text-subtle);
+  opacity: 1;
+}
+input[type="text"],
+input:not([type]) {
+  user-select: text;
+}
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--ch-hairline) transparent;
+}
+
+/* Icon button: transparent, hairline hover (on art) or hover fill (on bg). */
+.ib {
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  padding: 8px;
+  cursor: pointer;
+  color: var(--ch-text);
+  display: grid;
+  place-items: center;
+  flex: none;
+  transition: background-color 0.12s;
+}
+.ib:hover {
+  background: var(--ch-hairline);
+}
+.ib.solid:hover {
+  background: var(--ch-hover);
+}
+.ib.close:hover {
+  background: #c42b1c;
+  color: #fff;
+}
+
+.btn {
+  height: 32px;
+  padding: 0 14px;
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+  transition:
+    background-color 0.12s,
+    filter 0.12s;
+}
+.btn.primary {
+  border: 0;
+  background: var(--ch-accent);
+  color: var(--ch-on-accent);
+  font-weight: 600;
+}
+.btn.primary:hover {
+  filter: brightness(1.08);
+}
+.btn.secondary {
+  border: 1px solid var(--ch-accent-line);
+  background: transparent;
+  color: var(--ch-text);
+}
+.btn.ghost {
+  border: 1px solid var(--ch-hairline);
+  background: transparent;
+  color: var(--ch-text);
+}
+.btn.secondary:hover,
+.btn.ghost:hover {
+  background: var(--ch-hover);
+}
+.btn:disabled {
+  background: var(--ch-surface-2);
+  color: var(--ch-text-subtle);
+  border-color: transparent;
+  cursor: default;
+  filter: none;
+}
+.btn.sm {
+  height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.field {
+  height: 30px;
+  padding: 0 9px;
+  border-radius: 4px;
+  background: var(--ch-surface);
+  border: 1px solid var(--ch-hairline);
+  border-bottom-color: var(--ch-text-subtle);
+  font-size: 13px;
+  color: var(--ch-text);
+  min-width: 0;
+  width: 100%;
+}
+.field:focus {
+  border-bottom: 2px solid var(--ch-accent);
+  background: var(--ch-surface-2);
+}
+.field.error {
+  border-color: var(--ch-danger);
+}
+
+.eyebrow {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ch-text-subtle);
+}
+.mono {
+  font-family: var(--font-mono);
+}
+.ellipsis {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.subtle {
+  color: var(--ch-text-subtle);
+}
+
+@keyframes chFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes chFade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes chIndet {
+  0% {
+    left: -35%;
+  }
+  100% {
+    left: 100%;
+  }
+}
+@keyframes chSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+:root[data-motion="off"] *,
+:root[data-motion="off"] *::before,
+:root[data-motion="off"] *::after {
+  animation-duration: 1ms !important;
+  animation-iteration-count: 1 !important;
+}

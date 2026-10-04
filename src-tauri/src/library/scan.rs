@@ -39,6 +39,22 @@ pub struct Progress {
     /// Files that needed reading (new or changed).
     pub total: usize,
     pub processed: usize,
+    /// Of the files read so far: with and without artwork.
+    pub with_cover: usize,
+    pub no_cover: usize,
+    /// The last file read, for the scanning screen.
+    pub file: String,
+}
+
+/// Where cover art comes from when a file has both embedded art and a
+/// folder image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CoverSource {
+    #[default]
+    Embedded,
+    Folder,
+    EmbeddedOnly,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -101,16 +117,34 @@ struct CoverBytes {
 }
 
 /// Scan one watched folder into the database.
+/// How a scan runs: cancellation flag and cover preference.
+pub struct ScanOptions<'a> {
+    pub cancel: &'a AtomicBool,
+    pub cover_source: CoverSource,
+}
+
 pub fn scan_folder(
     conn: &Mutex<Connection>,
     store: &CoverStore,
     folder_id: i64,
     root: &Path,
-    cancel: &AtomicBool,
+    opts: &ScanOptions,
     summary: &mut Summary,
     progress: &dyn Fn(Progress),
 ) -> Result<(), String> {
+    let (cancel, cover_source) = (opts.cancel, opts.cover_source);
     let folder = root.to_string_lossy().into_owned();
+    #[allow(clippy::too_many_arguments)]
+    let p = |phase, found, total, processed, with_cover, no_cover, file: String| Progress {
+        folder: folder.clone(),
+        phase,
+        found,
+        total,
+        processed,
+        with_cover,
+        no_cover,
+        file,
+    };
     if !root.is_dir() {
         summary.missing_folders.push(folder);
         return Ok(());
@@ -147,7 +181,7 @@ pub fn scan_folder(
             Err(e) => summary.fail(entry.path(), format!("Can't read file info: {e}")),
         }
         if found.len() % 500 == 0 {
-            progress(Progress { folder: folder.clone(), phase: Phase::Discovering, found: found.len(), total: 0, processed: 0 });
+            progress(p(Phase::Discovering, found.len(), 0, 0, 0, 0, String::new()));
         }
     }
 
@@ -162,7 +196,8 @@ pub fn scan_folder(
         }
     }
     let total = todo.len();
-    progress(Progress { folder: folder.clone(), phase: Phase::Reading, found: found.len(), total, processed: 0 });
+    progress(p(Phase::Reading, found.len(), total, 0, 0, 0, String::new()));
+    let (mut with_cover, mut no_cover) = (0usize, 0usize);
 
     // 3. Read tags + covers in parallel, write each chunk in one transaction.
     let folder_covers: FolderCovers = Mutex::new(HashMap::new());
@@ -173,7 +208,15 @@ pub fn scan_folder(
             return Ok(());
         }
         let results: Vec<(&Found, Result<ReadResult, String>)> =
-            chunk.par_iter().map(|f| (*f, read_file(f, folder_id, &folder_covers))).collect();
+            chunk.par_iter().map(|f| (*f, read_file(f, folder_id, &folder_covers, cover_source))).collect();
+        for (_, r) in &results {
+            match r {
+                Ok((_, Some(_))) => with_cover += 1,
+                Ok((_, None)) => no_cover += 1,
+                Err(_) => {}
+            }
+        }
+        let last_file = chunk.last().map(|f| f.path.to_string_lossy().into_owned()).unwrap_or_default();
 
         // Cache covers we haven't seen before, in parallel.
         let mut new_hashes = HashSet::new();
@@ -231,11 +274,11 @@ pub fn scan_folder(
         drop(c);
 
         processed += chunk.len();
-        progress(Progress { folder: folder.clone(), phase: Phase::Reading, found: found.len(), total, processed });
+        progress(p(Phase::Reading, found.len(), total, processed, with_cover, no_cover, last_file));
     }
 
     // 4. Forget files that disappeared.
-    progress(Progress { folder: folder.clone(), phase: Phase::Cleaning, found: found.len(), total, processed });
+    progress(p(Phase::Cleaning, found.len(), total, processed, with_cover, no_cover, String::new()));
     let gone: Vec<&String> = known.keys().filter(|p| !seen.contains(*p)).collect();
     if !gone.is_empty() {
         let mut c = conn.lock();
@@ -255,28 +298,47 @@ fn read_file(
     f: &Found,
     folder_id: i64,
     folder_covers: &FolderCovers,
+    cover_source: CoverSource,
 ) -> Result<ReadResult, String> {
     let (mut track, embedded) = read(&f.path, true)?;
     track.folder_id = folder_id;
     track.mtime = f.mtime;
     track.size = f.size;
 
-    let mut cover = embedded.map(|bytes| CoverBytes { hash: covers::hash(&bytes), bytes: Arc::new(bytes), source: "embedded" });
-    if cover.is_none() {
-        if let Some(dir) = f.path.parent() {
-            let cached = folder_covers.lock().get(dir).cloned();
-            let entry = match cached {
-                Some(e) => e,
-                None => {
-                    let e = covers::find_in_folder(dir).and_then(|p| std::fs::read(p).ok()).map(|b| (covers::hash(&b), Arc::new(b)));
-                    folder_covers.lock().insert(dir.to_path_buf(), e.clone());
-                    e
-                }
-            };
-            cover = entry.map(|(hash, bytes)| CoverBytes { hash, bytes, source: "folder" });
-        }
-    }
+    let from_file = || embedded.clone().map(|bytes| CoverBytes { hash: covers::hash(&bytes), bytes: Arc::new(bytes), source: "embedded" });
+    let from_folder = || {
+        let dir = f.path.parent()?;
+        let cached = folder_covers.lock().get(dir).cloned();
+        let entry = match cached {
+            Some(e) => e,
+            None => {
+                let e = covers::find_in_folder(dir).and_then(|p| std::fs::read(p).ok()).map(|b| (covers::hash(&b), Arc::new(b)));
+                folder_covers.lock().insert(dir.to_path_buf(), e.clone());
+                e
+            }
+        };
+        entry.map(|(hash, bytes)| CoverBytes { hash, bytes, source: "folder" })
+    };
+    let cover = match cover_source {
+        CoverSource::Embedded => from_file().or_else(from_folder),
+        CoverSource::Folder => from_folder().or_else(from_file),
+        CoverSource::EmbeddedOnly => from_file(),
+    };
     Ok((track, cover))
+}
+
+/// Cover bytes for one file, honoring the cover source preference.
+pub fn cover_bytes(path: &Path, embedded: Option<Vec<u8>>, source: CoverSource) -> Option<(Vec<u8>, &'static str)> {
+    let from_folder = || {
+        let p = covers::find_in_folder(path.parent()?)?;
+        std::fs::read(p).ok().map(|b| (b, "folder"))
+    };
+    let from_file = || embedded.clone().map(|b| (b, "embedded"));
+    match source {
+        CoverSource::Embedded => from_file().or_else(from_folder),
+        CoverSource::Folder => from_folder().or_else(from_file),
+        CoverSource::EmbeddedOnly => from_file(),
+    }
 }
 
 /// Read tags and audio properties into a track record, plus the embedded

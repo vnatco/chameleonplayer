@@ -25,6 +25,8 @@ const TICK: Duration = Duration::from_millis(33);
 const POSITION_EVERY: Duration = Duration::from_millis(250);
 /// "Previous" restarts the current track instead when past this point.
 const PREV_RESTART_AFTER: f64 = 3.0;
+/// How long before the end of a track the next one is opened and queued.
+const PRELOAD_AHEAD: f64 = 15.0;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -64,6 +66,9 @@ pub struct Status {
     pub volume: f32,
     pub repeat: Repeat,
     pub queue_len: usize,
+    /// Changes whenever the queue's contents change, so the UI knows when to
+    /// refetch it.
+    pub queue_id: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -81,6 +86,9 @@ pub enum Event {
 #[derive(Debug)]
 pub enum Command {
     Load { queue: Vec<Track>, index: usize, autoplay: bool },
+    /// Insert tracks at `at` (clamped to the queue length); optionally start
+    /// playing the first inserted track.
+    Insert { tracks: Vec<Track>, at: usize, play: bool },
     Play,
     Pause,
     Toggle,
@@ -101,6 +109,7 @@ pub type Emitter = Arc<dyn Fn(Event) + Send + Sync>;
 pub struct AudioHandle {
     tx: Sender<Command>,
     status: Arc<Mutex<Status>>,
+    queue: Arc<Mutex<Vec<Track>>>,
 }
 
 impl AudioHandle {
@@ -112,6 +121,10 @@ impl AudioHandle {
 
     pub fn status(&self) -> Status {
         self.status.lock().clone()
+    }
+
+    pub fn queue(&self) -> Vec<Track> {
+        self.queue.lock().clone()
     }
 }
 
@@ -126,13 +139,15 @@ pub fn spawn(emit: Emitter) -> AudioHandle {
         volume: 0.8,
         repeat: Repeat::Off,
         queue_len: 0,
+        queue_id: 0,
     }));
-    let shared = status.clone();
+    let queue = Arc::new(Mutex::new(Vec::new()));
+    let (shared, shared_queue) = (status.clone(), queue.clone());
     std::thread::Builder::new()
         .name("audio".into())
-        .spawn(move || Engine::new(emit, shared).run(rx))
+        .spawn(move || Engine::new(emit, shared, shared_queue).run(rx))
         .expect("spawn audio thread");
-    AudioHandle { tx, status }
+    AudioHandle { tx, status, queue }
 }
 
 struct Engine {
@@ -151,13 +166,17 @@ struct Engine {
     meter_on: bool,
     emit: Emitter,
     shared: Arc<Mutex<Status>>,
+    shared_queue: Arc<Mutex<Vec<Track>>>,
+    queue_id: u64,
     last_position: Instant,
 }
 
 impl Engine {
-    fn new(emit: Emitter, shared: Arc<Mutex<Status>>) -> Self {
+    fn new(emit: Emitter, shared: Arc<Mutex<Status>>, shared_queue: Arc<Mutex<Vec<Track>>>) -> Self {
         let volume = shared.lock().volume;
         Self {
+            shared_queue,
+            queue_id: 0,
             sink: None,
             player: None,
             queue: Vec::new(),
@@ -192,10 +211,30 @@ impl Engine {
         match cmd {
             Command::Load { queue, index, autoplay } => {
                 self.queue = queue;
+                self.queue_changed();
                 if self.queue.is_empty() {
                     self.stop();
+                    self.index = None;
                 } else {
                     self.start(index.min(self.queue.len() - 1), autoplay);
+                }
+            }
+            Command::Insert { tracks, at, play } => {
+                if tracks.is_empty() {
+                    return;
+                }
+                let at = at.min(self.queue.len());
+                let n = tracks.len();
+                self.queue.splice(at..at, tracks);
+                let shift = |i: usize| if i >= at { i + n } else { i };
+                self.index = self.index.map(shift);
+                self.preloaded = self.preloaded.map(shift);
+                self.preload_failed = self.preload_failed.map(shift);
+                self.queue_changed();
+                if play {
+                    self.start(at, true);
+                } else {
+                    self.fix_preload();
                 }
             }
             Command::Play => self.play(),
@@ -243,17 +282,7 @@ impl Engine {
             }
             Command::SetRepeat(r) => {
                 self.repeat = r;
-                // The preloaded track may no longer be the right one.
-                if self.preloaded.is_some() && self.preloaded != self.next_index(false) {
-                    let pos = self.position();
-                    let paused = self.state() == PlayState::Paused;
-                    if let Some(i) = self.index {
-                        self.start(i, !paused);
-                        self.seek(pos);
-                    }
-                } else {
-                    self.preload();
-                }
+                self.fix_preload();
             }
             Command::SetMeter(on) => {
                 self.meter_on = on;
@@ -273,7 +302,6 @@ impl Engine {
             // Gapless hand-over happened.
             self.index = self.preloaded.take();
             self.duration = self.index.and_then(|i| self.queue[i].duration);
-            self.preload();
             self.publish();
         } else if len == 0 && self.index.is_some() {
             // Reached the end of the queue.
@@ -283,6 +311,7 @@ impl Engine {
             return;
         }
 
+        self.maybe_preload();
         if self.meter_on && self.state() == PlayState::Playing {
             (self.emit)(Event::Level { value: self.level.get() });
         }
@@ -328,7 +357,7 @@ impl Engine {
                     self.index = Some(i);
                     self.duration = dur;
                     self.player = Some(player);
-                    self.preload();
+                    self.maybe_preload();
                     return;
                 }
                 Err(msg) => {
@@ -339,6 +368,38 @@ impl Engine {
             }
         }
         self.index = None;
+    }
+
+    fn queue_changed(&mut self) {
+        self.queue_id += 1;
+        *self.shared_queue.lock() = self.queue.clone();
+    }
+
+    /// Preload the next track only near the end of the current one, so queue
+    /// edits before then never need to touch the audio pipeline.
+    fn maybe_preload(&mut self) {
+        if self.preloaded.is_some() || self.player.is_none() {
+            return;
+        }
+        if let Some(d) = self.duration {
+            if d - self.position() > PRELOAD_AHEAD {
+                return;
+            }
+        }
+        self.preload();
+    }
+
+    /// If the track already queued behind the current one is no longer the
+    /// right next track, rebuild the player at the same position.
+    fn fix_preload(&mut self) {
+        if self.preloaded.is_none() || self.preloaded == self.next_index(false) {
+            return;
+        }
+        let (pos, paused) = (self.position(), self.state() == PlayState::Paused);
+        if let Some(i) = self.index {
+            self.start(i, !paused);
+            self.seek(pos);
+        }
     }
 
     fn preload(&mut self) {
@@ -441,6 +502,7 @@ impl Engine {
             volume: self.volume,
             repeat: self.repeat,
             queue_len: self.queue.len(),
+            queue_id: self.queue_id,
         };
         *self.shared.lock() = status.clone();
         (self.emit)(Event::Status(status));

@@ -6,7 +6,7 @@ use std::path::Path;
 
 pub type Result<T> = rusqlite::Result<T>;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
@@ -76,6 +76,15 @@ fn init(conn: &Connection) -> Result<()> {
     }
     if version < 2 {
         conn.execute_batch("CREATE TABLE meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL);")?;
+        conn.pragma_update(None, "user_version", 2)?;
+    }
+    if version < 3 {
+        // Compact tint so lists can glow without loading whole palettes.
+        // Filled by the palette upgrade that runs on startup.
+        conn.execute_batch(
+            "ALTER TABLE covers ADD COLUMN edge TEXT NOT NULL DEFAULT '';
+             ALTER TABLE covers ADD COLUMN glow TEXT NOT NULL DEFAULT '';",
+        )?;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
     Ok(())
@@ -97,8 +106,8 @@ pub fn cover_files(conn: &Connection) -> Result<Vec<(String, String)>> {
     rows.collect()
 }
 
-pub fn set_palette(conn: &Connection, hash: &str, palette_json: &str) -> Result<()> {
-    conn.execute("UPDATE covers SET palette = ?2 WHERE hash = ?1", params![hash, palette_json])?;
+pub fn set_palette(conn: &Connection, hash: &str, palette_json: &str, edge: &str, glow: &str) -> Result<()> {
+    conn.execute("UPDATE covers SET palette = ?2, edge = ?3, glow = ?4 WHERE hash = ?1", params![hash, palette_json, edge, glow])?;
     Ok(())
 }
 
@@ -124,6 +133,9 @@ pub struct Cover {
     pub thumb: String,
     pub width: u32,
     pub height: u32,
+    /// The cover's 1 px edge color and bottom glow color (`#rrggbb`).
+    pub edge: String,
+    pub glow: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -169,6 +181,9 @@ pub struct NamedCount {
     pub track_count: i64,
     pub album_count: i64,
     pub cover: Option<Cover>,
+    /// Up to four distinct album covers, most-used first (artist stacks,
+    /// genre mosaics).
+    pub covers: Vec<Cover>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -213,6 +228,8 @@ pub struct NewCover {
     pub width: u32,
     pub height: u32,
     pub palette_json: String,
+    pub edge: String,
+    pub glow: String,
 }
 
 // ---- Folders ---------------------------------------------------------------
@@ -251,8 +268,8 @@ pub fn has_cover(conn: &Connection, hash: &str) -> Result<bool> {
 
 pub fn insert_cover(conn: &Connection, c: &NewCover) -> Result<()> {
     conn.execute(
-        "INSERT OR IGNORE INTO covers(hash, full, thumb, width, height, palette) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![c.hash, c.full, c.thumb, c.width, c.height, c.palette_json],
+        "INSERT OR IGNORE INTO covers(hash, full, thumb, width, height, palette, edge, glow) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![c.hash, c.full, c.thumb, c.width, c.height, c.palette_json, c.edge, c.glow],
     )?;
     Ok(())
 }
@@ -300,12 +317,20 @@ pub fn prune_covers(conn: &Connection) -> Result<Vec<(String, String)>> {
 
 const TRACK_COLS: &str = "t.id, t.path, t.title, t.artist, t.album, t.album_artist, t.album_key, t.genre, t.year,
     t.track_no, t.disc_no, t.duration, t.bitrate, t.sample_rate, t.channels, t.bit_depth, t.format,
-    c.hash, c.full, c.thumb, c.width, c.height, t.cover_source";
+    c.hash, c.full, c.thumb, c.width, c.height, c.edge, c.glow, t.cover_source";
 
 fn cover_at(r: &Row, i: usize) -> Result<Option<Cover>> {
     let hash: Option<String> = r.get(i)?;
     Ok(match hash {
-        Some(hash) => Some(Cover { hash, full: r.get(i + 1)?, thumb: r.get(i + 2)?, width: r.get(i + 3)?, height: r.get(i + 4)? }),
+        Some(hash) => Some(Cover {
+            hash,
+            full: r.get(i + 1)?,
+            thumb: r.get(i + 2)?,
+            width: r.get(i + 3)?,
+            height: r.get(i + 4)?,
+            edge: r.get(i + 5)?,
+            glow: r.get(i + 6)?,
+        }),
         None => None,
     })
 }
@@ -330,7 +355,7 @@ fn track_row(r: &Row) -> Result<TrackRow> {
         bit_depth: r.get(15)?,
         format: r.get(16)?,
         cover: cover_at(r, 17)?,
-        cover_source: r.get(22)?,
+        cover_source: r.get(24)?,
     })
 }
 
@@ -407,7 +432,7 @@ const ALBUM_COVER: &str = "(SELECT t2.cover_hash FROM tracks t2 WHERE t2.album_k
 
 pub fn albums(conn: &Connection, artist: Option<&str>, search: Option<&str>) -> Result<Vec<AlbumRow>> {
     let mut sql = format!(
-        "SELECT a.album_key, a.title, a.artist, a.year, a.n, a.dur, c.hash, c.full, c.thumb, c.width, c.height FROM (
+        "SELECT a.album_key, a.title, a.artist, a.year, a.n, a.dur, c.hash, c.full, c.thumb, c.width, c.height, c.edge, c.glow FROM (
             SELECT t.album_key, MAX(t.album) AS title,
                    COALESCE(NULLIF(MAX(t.album_artist), ''), MAX(t.artist)) AS artist,
                    MIN(t.year) AS year, COUNT(*) AS n, SUM(t.duration) AS dur, {ALBUM_COVER} AS cover_hash
@@ -442,7 +467,7 @@ pub fn albums(conn: &Connection, artist: Option<&str>, search: Option<&str>) -> 
 
 fn named_counts(conn: &Connection, column: &str, search: Option<&str>) -> Result<Vec<NamedCount>> {
     let mut sql = format!(
-        "SELECT a.name, a.n, a.albums, c.hash, c.full, c.thumb, c.width, c.height FROM (
+        "SELECT a.name, a.n, a.albums, c.hash, c.full, c.thumb, c.width, c.height, c.edge, c.glow FROM (
             SELECT t.{column} AS name, COUNT(*) AS n, COUNT(DISTINCT t.album_key) AS albums,
                    (SELECT t2.cover_hash FROM tracks t2 WHERE t2.{column} = t.{column} COLLATE NOCASE
                       AND t2.cover_hash IS NOT NULL GROUP BY t2.cover_hash ORDER BY COUNT(*) DESC LIMIT 1) AS cover_hash
@@ -456,9 +481,20 @@ fn named_counts(conn: &Connection, column: &str, search: Option<&str>) -> Result
     sql += &format!(" GROUP BY t.{column} COLLATE NOCASE) a LEFT JOIN covers c ON c.hash = a.cover_hash ORDER BY a.name COLLATE NOCASE");
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(rusqlite::params_from_iter(args.iter()), |r| {
-        Ok(NamedCount { name: r.get(0)?, track_count: r.get(1)?, album_count: r.get(2)?, cover: cover_at(r, 3)? })
+        Ok(NamedCount { name: r.get(0)?, track_count: r.get(1)?, album_count: r.get(2)?, cover: cover_at(r, 3)?, covers: Vec::new() })
     })?;
-    rows.collect()
+    let mut out: Vec<NamedCount> = rows.collect::<Result<_>>()?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT c.hash, c.full, c.thumb, c.width, c.height, c.edge, c.glow FROM covers c JOIN (
+            SELECT t.cover_hash AS h, COUNT(*) AS n FROM tracks t
+            WHERE t.{column} = ?1 COLLATE NOCASE AND t.cover_hash IS NOT NULL
+            GROUP BY t.album_key, t.cover_hash
+         ) x ON x.h = c.hash GROUP BY c.hash ORDER BY MAX(x.n) DESC LIMIT 4"
+    ))?;
+    for n in &mut out {
+        n.covers = stmt.query_map([&n.name], |r| cover_at(r, 0).map(|c| c.expect("hash is not null")))?.collect::<Result<_>>()?;
+    }
+    Ok(out)
 }
 
 pub fn artists(conn: &Connection, search: Option<&str>) -> Result<Vec<NamedCount>> {
@@ -515,7 +551,16 @@ mod tests {
     }
 
     fn cover(hash: &str) -> NewCover {
-        NewCover { hash: hash.into(), full: format!("{hash}.jpg"), thumb: format!("{hash}_t.jpg"), width: 10, height: 10, palette_json: "{}".into() }
+        NewCover {
+            hash: hash.into(),
+            full: format!("{hash}.jpg"),
+            thumb: format!("{hash}_t.jpg"),
+            width: 10,
+            height: 10,
+            palette_json: "{}".into(),
+            edge: "#000000".into(),
+            glow: "#000000".into(),
+        }
     }
 
     #[test]

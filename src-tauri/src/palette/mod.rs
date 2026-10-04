@@ -1,33 +1,34 @@
-//! Cover -> palette extraction: the "chameleon" in Chameleon Player.
+//! Cover -> palette: the "chameleon" in Chameleon Player.
 //!
-//! The original app averaged the cover's edge pixels into one border color,
-//! which tends to produce mud (red + green edges -> brown). Here we:
+//! Implements the design's color system (Chameleon Spec, section F):
 //!
-//! 1. cluster the whole cover in OKLab (k-means) to find real swatches,
-//! 2. cluster each edge band separately so the glow can differ per side,
-//! 3. derive UI roles (background, text, accent, ...) from those swatches and
-//!    nudge their lightness until they meet WCAG contrast targets.
+//! 1. Sample: downscale to 48x48, average a 5 px strip per edge in linear
+//!    light for the glow sources, bucket colors (512 buckets) and measure mean
+//!    luminance and chroma.
+//! 2. Pick dominant / vibrant / muted swatches.
+//! 3. Build roles from the dominant hue at fixed lightness steps.
+//! 4. Enforce contrast by walking lightness only (text >= 7:1, subtle and
+//!    accent >= 4.5:1), never hue.
 //!
-//! Field names are provisional until the design's token names land; the
-//! frontend maps these onto CSS custom properties.
+//! On top of the spec's four glow colors, each edge is also sampled in three
+//! segments so the glow can shift color along an edge.
+//!
+//! The palette is computed once per cover (at scan time) and cached; the UI
+//! only interpolates between finished palettes.
 
 pub mod color;
 
-use color::{Lab, Lch, Rgb, Swatch};
+use color::{contrast, hsl_to_rgb, lin, mix_lin, rgb_to_hsl, unlin, Rgb};
 use image::{imageops::FilterType, DynamicImage};
 use serde::Serialize;
 
 /// Bump whenever extraction or the output shape changes; cached palettes
 /// with an older version are recomputed on startup.
-pub const VERSION: i64 = 4;
+pub const VERSION: i64 = 6;
 
-/// Longest side the cover is reduced to before analysis. Plenty for color,
-/// and keeps extraction to a few milliseconds.
-const ANALYSIS_SIZE: u32 = 96;
-/// Edge bands are sampled from a larger copy; see [`extract`].
-const EDGE_ANALYSIS_SIZE: u32 = 256;
-/// Fraction of the cover's width/height that counts as an "edge band".
-const EDGE_BAND: f32 = 0.08;
+const N: u32 = 48;
+/// Edge strip depth in pixels of the 48x48 sample.
+const D: u32 = 5;
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -37,330 +38,318 @@ pub enum Scheme {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct Sides {
-    pub top: Swatch,
-    pub right: Swatch,
-    pub bottom: Swatch,
-    pub left: Swatch,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct SideStops {
-    pub top: [Swatch; 3],
-    pub right: [Swatch; 3],
-    pub bottom: [Swatch; 3],
-    pub left: [Swatch; 3],
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct Roles {
-    pub background: Swatch,
-    pub surface: Swatch,
-    pub surface_raised: Swatch,
-    pub border: Swatch,
-    pub text: Swatch,
-    pub text_subtle: Swatch,
-    pub accent: Swatch,
-    pub on_accent: Swatch,
+    pub bg: Rgb,
+    pub surface: Rgb,
+    pub surface2: Rgb,
+    pub accent: Rgb,
+    #[serde(rename = "onAccent")]
+    pub on_accent: Rgb,
+    pub text: Rgb,
+    pub subtle: Rgb,
+    /// Mean of the four glow colors: the 1 px sleeve border.
+    pub edge: Rgb,
+}
+
+/// Per-side values, keyed like the spec's tokens (t/r/b/l).
+#[derive(Debug, Clone, Serialize)]
+pub struct Sides<T> {
+    pub t: T,
+    pub r: T,
+    pub b: T,
+    pub l: T,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct WeightedSwatch {
-    #[serde(flatten)]
-    pub swatch: Swatch,
-    /// Share of the cover's pixels, 0..1.
-    pub population: f32,
+pub struct Ratios {
+    pub text: f32,
+    pub subtle: f32,
+    pub accent: f32,
+    #[serde(rename = "onAccent")]
+    pub on_accent: f32,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Palette {
     pub scheme: Scheme,
-    pub dominant: Swatch,
-    pub vibrant: Swatch,
-    pub muted: Swatch,
-    /// True edge colors, for the crisp thin border.
-    pub edges: Sides,
-    /// Edge colors lifted so they read as light on a dark desktop.
-    pub glow: Sides,
-    /// The glow sampled in three segments along each side, so it can be
-    /// drawn as a gradient (top/bottom run left to right, left/right run top
-    /// to bottom).
-    pub glow_stops: SideStops,
+    pub gray: bool,
+    /// True for the neutral no-cover palette.
+    pub fallback: bool,
     pub roles: Roles,
-    /// All clusters, largest first. Handy for debugging and for designers.
-    pub swatches: Vec<WeightedSwatch>,
-    /// False when this is the neutral no-cover fallback.
-    pub from_cover: bool,
+    pub glow: Sides<Rgb>,
+    #[serde(rename = "glowA")]
+    pub glow_a: Sides<f32>,
+    /// Three segments per side: top/bottom run left to right, left/right run
+    /// top to bottom.
+    pub glow_stops: Sides<[Rgb; 3]>,
+    pub dominant: Rgb,
+    pub vibrant: Rgb,
+    pub muted: Rgb,
+    pub swatches: Vec<Rgb>,
+    pub ratios: Ratios,
+    /// Contrast corrections applied, for the spec's debug readout.
+    pub fixes: Vec<String>,
+}
+
+/// A color bucket: mean color, pixel count, and its HSL.
+type Entry = (Rgb, u32, (f32, f32, f32));
+
+struct Analysis {
+    edges: Sides<Rgb>,
+    segments: Sides<[Rgb; 3]>,
+    dominant: Rgb,
+    vibrant: Rgb,
+    muted: Rgb,
+    mean_lum: f32,
+    chroma: f32,
+    swatches: Vec<Rgb>,
 }
 
 /// Extract a palette from decoded cover art.
 pub fn extract(img: &DynamicImage) -> Palette {
-    let all = lab_pixels(&img.resize(ANALYSIS_SIZE, ANALYSIS_SIZE, FilterType::Triangle));
+    derive(&analyze(img))
+}
 
-    // Edges come from a sharper copy so thin bright details (neon lines,
-    // lettering) keep their color instead of blurring into the background.
-    let edge_img = img.resize(EDGE_ANALYSIS_SIZE, EDGE_ANALYSIS_SIZE, FilterType::Triangle).to_rgb8();
-    let (w, h) = edge_img.dimensions();
+fn analyze(img: &DynamicImage) -> Analysis {
+    let small = img.resize_exact(N, N, FilterType::Triangle).to_rgb8();
     let px = |x: u32, y: u32| {
-        let p = edge_img.get_pixel(x, y);
-        Rgb::from_u8(p[0], p[1], p[2]).to_lab()
+        let p = small.get_pixel(x, y);
+        [p[0], p[1], p[2]]
     };
-    let bw = ((w as f32 * EDGE_BAND).round() as u32).max(1);
-    let bh = ((h as f32 * EDGE_BAND).round() as u32).max(1);
-    let band = |xs: std::ops::Range<u32>, ys: std::ops::Range<u32>| -> Vec<Lab> {
-        ys.flat_map(|y| xs.clone().map(move |x| (x, y))).map(|(x, y)| px(x, y)).collect()
-    };
-    let edge = |pts: Vec<Lab>| -> Lch { biggest_cluster(&pts, 3).to_lch() };
-    let emit = |pts: Vec<Lab>| -> Lch { emissive_cluster(&pts).to_lch() };
-    let sides_px = [band(0..w, 0..bh), band(w - bw..w, 0..h), band(0..w, h - bh..h), band(0..bw, 0..h)];
-    let edges_lch = sides_px.clone().map(edge);
-    let glow_lch = sides_px.map(emit);
-    // Thirds along each side.
-    let third = |n: u32, i: u32| (n * i / 3)..(n * (i + 1) / 3).max(n * i / 3 + 1);
-    let stops = [
-        [0, 1, 2].map(|i| emit(band(third(w, i), 0..bh))),
-        [0, 1, 2].map(|i| emit(band(w - bw..w, third(h, i)))),
-        [0, 1, 2].map(|i| emit(band(third(w, i), h - bh..h))),
-        [0, 1, 2].map(|i| emit(band(0..bw, third(h, i)))),
-    ];
 
-    let clusters = kmeans(&all, 8, 12);
-    build(clusters, edges_lch, glow_lch, stops, mean_lightness(&all), true)
-}
-
-fn lab_pixels(img: &DynamicImage) -> Vec<Lab> {
-    img.to_rgb8().pixels().map(|p| Rgb::from_u8(p[0], p[1], p[2]).to_lab()).collect()
-}
-
-/// Neutral palette used when a track has no cover. Deliberately cool and
-/// slightly tinted so it still feels "alive" rather than broken.
-pub fn fallback() -> Palette {
-    let base = Lch { l: 0.32, c: 0.035, h: 265.0 };
-    let accent = Lch { l: 0.72, c: 0.11, h: 280.0 };
-    let clusters = vec![
-        Cluster { centroid: base.to_lab(), population: 0.8 },
-        Cluster { centroid: accent.to_lab(), population: 0.2 },
-    ];
-    // A soft lavender halo, so "no cover" still feels alive.
-    let glow = Lch { l: 0.6, c: 0.075, h: 278.0 };
-    build(clusters, [base; 4], [glow; 4], [[glow; 3]; 4], 0.3, false)
-}
-
-fn build(mut clusters: Vec<Cluster>, edges: [Lch; 4], glow: [Lch; 4], stops: [[Lch; 3]; 4], mean_l: f32, from_cover: bool) -> Palette {
-    clusters.sort_by(|a, b| b.population.total_cmp(&a.population));
-    let lch: Vec<(Lch, f32)> = clusters.iter().map(|c| (c.centroid.to_lch(), c.population)).collect();
-
-    let dominant = lch[0].0;
-    let vibrant = lch
-        .iter()
-        .filter(|(c, p)| (0.35..=0.88).contains(&c.l) && c.c > 0.05 && *p > 0.01)
-        .max_by(|(a, pa), (b, pb)| (a.c * pa.powf(0.3)).total_cmp(&(b.c * pb.powf(0.3))))
-        .map(|(c, _)| *c)
-        .unwrap_or(dominant);
-    let muted = lch
-        .iter()
-        .filter(|(c, p)| c.c < 0.08 && (0.2..=0.85).contains(&c.l) && *p > 0.02)
-        .max_by(|(_, pa), (_, pb)| pa.total_cmp(pb))
-        .map(|(c, _)| *c)
-        .unwrap_or_else(|| dominant.with_c(dominant.c * 0.35));
-
-    // Only near-white covers get a light UI; dark is the better stage for art.
-    let scheme = if mean_l > 0.78 { Scheme::Light } else { Scheme::Dark };
-    let roles = roles(scheme, dominant, vibrant);
-
-    let glow = glow.map(lift);
-    let [t, r, b, l] = stops.map(|side| side.map(|e| Swatch::from(lift(e))));
-    let glow_stops = SideStops { top: t, right: r, bottom: b, left: l };
-
-    Palette {
-        scheme,
-        dominant: dominant.into(),
-        vibrant: vibrant.into(),
-        muted: muted.into(),
-        edges: sides(edges),
-        glow: sides(glow),
-        glow_stops,
-        roles,
-        swatches: lch.iter().map(|(c, p)| WeightedSwatch { swatch: (*c).into(), population: *p }).collect(),
-        from_cover,
-    }
-}
-
-/// Lift dark/dull edge colors so the glow is visible; keep the hue honest.
-fn lift(e: Lch) -> Lch {
-    let l = e.l.clamp(0.55, 0.85);
-    let c = if e.c < 0.02 { e.c } else { (e.c * 1.3).min(0.26) };
-    Lch { l, c, h: e.h }
-}
-
-fn sides([top, right, bottom, left]: [Lch; 4]) -> Sides {
-    Sides { top: top.into(), right: right.into(), bottom: bottom.into(), left: left.into() }
-}
-
-fn roles(scheme: Scheme, dominant: Lch, vibrant: Lch) -> Roles {
-    let hue = dominant.h;
-    // Keep neutrals only gently tinted; a fully saturated background is loud.
-    let tint = dominant.c.min(0.05);
-    let neutral = |l: f32, c_scale: f32| Lch { l, c: tint * c_scale, h: hue };
-
-    let (background, surface, surface_raised, border, text_l, subtle_l) = match scheme {
-        Scheme::Dark => (neutral(0.17, 0.7), neutral(0.215, 0.75), neutral(0.26, 0.8), neutral(0.34, 1.0), 0.96, 0.76),
-        Scheme::Light => (neutral(0.975, 0.3), neutral(0.94, 0.4), neutral(0.905, 0.5), neutral(0.83, 0.8), 0.22, 0.45),
-    };
-    let bg = background.to_rgb();
-
-    let text = ensure_contrast(Lch { l: text_l, c: tint.min(0.02), h: hue }, bg, 7.0, scheme);
-    let text_subtle = ensure_contrast(Lch { l: subtle_l, c: tint.min(0.035), h: hue }, bg, 4.5, scheme);
-
-    let mut accent = if vibrant.c > 0.04 { vibrant } else { dominant.with_l(match scheme { Scheme::Dark => 0.78, Scheme::Light => 0.45 }) };
-    accent = ensure_contrast(accent, bg, 3.0, scheme);
-
-    let accent_rgb = accent.to_rgb();
-    let light_on = Lch { l: 0.98, c: 0.01, h: accent.h };
-    let dark_on = Lch { l: 0.18, c: 0.02, h: accent.h };
-    let light_wins = light_on.to_rgb().contrast(accent_rgb) >= dark_on.to_rgb().contrast(accent_rgb);
-    let mut on_accent = if light_wins { light_on } else { dark_on };
-    // Tinted near-white/near-black can fall short on mid-lightness accents;
-    // pure white or black always reaches at least 4.58:1 against any color.
-    if on_accent.to_rgb().contrast(accent_rgb) < 4.5 {
-        let white = Lch { l: 1.0, c: 0.0, h: accent.h };
-        let black = Lch { l: 0.0, c: 0.0, h: accent.h };
-        on_accent = if white.to_rgb().contrast(accent_rgb) >= black.to_rgb().contrast(accent_rgb) { white } else { black };
-    }
-
-    Roles {
-        background: background.into(),
-        surface: surface.into(),
-        surface_raised: surface_raised.into(),
-        border: border.into(),
-        text: text.into(),
-        text_subtle: text_subtle.into(),
-        accent: accent.into(),
-        on_accent: on_accent.into(),
-    }
-}
-
-/// Move `c` away from the background's lightness until it reaches `min`
-/// contrast. Dark schemes push lighter, light schemes push darker.
-fn ensure_contrast(mut c: Lch, bg: Rgb, min: f32, scheme: Scheme) -> Lch {
-    let step = match scheme {
-        Scheme::Dark => 0.01,
-        Scheme::Light => -0.01,
-    };
-    for _ in 0..100 {
-        if c.to_rgb().contrast(bg) >= min {
-            break;
-        }
-        c = c.with_l(c.l + step);
-    }
-    c
-}
-
-fn mean_lightness(pts: &[Lab]) -> f32 {
-    if pts.is_empty() {
-        return 0.0;
-    }
-    pts.iter().map(|p| p.l).sum::<f32>() / pts.len() as f32
-}
-
-#[derive(Debug, Clone, Copy)]
-struct Cluster {
-    centroid: Lab,
-    population: f32,
-}
-
-/// The edge color that would "emit" light: favours bright, saturated
-/// clusters over a large dark background (neon lines on navy glow cyan, not
-/// grey), while a uniform edge still wins on sheer size.
-fn emissive_cluster(pts: &[Lab]) -> Lab {
-    kmeans(pts, 4, 10)
-        .into_iter()
-        .map(|c| {
-            let lch = c.centroid.to_lch();
-            // Roughly the light the cluster gives off: area x brightness^2 x color.
-            (c.centroid, c.population * lch.l * lch.l * (0.05 + lch.c))
-        })
-        .max_by(|a, b| a.1.total_cmp(&b.1))
-        .map(|(c, _)| c)
-        .unwrap_or_default()
-}
-
-fn biggest_cluster(pts: &[Lab], k: usize) -> Lab {
-    kmeans(pts, k, 10)
-        .into_iter()
-        .max_by(|a, b| a.population.total_cmp(&b.population))
-        .map(|c| c.centroid)
-        .unwrap_or_default()
-}
-
-/// Deterministic k-means in OKLab with farthest-point seeding, so the same
-/// cover always yields the same palette.
-fn kmeans(pts: &[Lab], k: usize, iters: usize) -> Vec<Cluster> {
-    if pts.is_empty() {
-        return vec![Cluster { centroid: Lab::default(), population: 1.0 }];
-    }
-    let mean = Lab {
-        l: mean_lightness(pts),
-        a: pts.iter().map(|p| p.a).sum::<f32>() / pts.len() as f32,
-        b: pts.iter().map(|p| p.b).sum::<f32>() / pts.len() as f32,
-    };
-    let first = *pts.iter().min_by(|a, b| a.dist2(mean).total_cmp(&b.dist2(mean))).unwrap();
-    let mut centroids = vec![first];
-    while centroids.len() < k {
-        let far = pts
-            .iter()
-            .max_by(|a, b| {
-                let da = centroids.iter().map(|c| a.dist2(*c)).fold(f32::MAX, f32::min);
-                let db = centroids.iter().map(|c| b.dist2(*c)).fold(f32::MAX, f32::min);
-                da.total_cmp(&db)
-            })
-            .copied()
-            .unwrap();
-        // Image has fewer distinct colors than k.
-        if centroids.iter().any(|c| c.dist2(far) < 1e-6) {
-            break;
-        }
-        centroids.push(far);
-    }
-
-    let mut assign = vec![0usize; pts.len()];
-    for _ in 0..iters {
-        for (i, p) in pts.iter().enumerate() {
-            assign[i] = (0..centroids.len()).min_by(|&a, &b| p.dist2(centroids[a]).total_cmp(&p.dist2(centroids[b]))).unwrap();
-        }
-        let mut sums = vec![(Lab::default(), 0usize); centroids.len()];
-        for (p, &ci) in pts.iter().zip(&assign) {
-            let s = &mut sums[ci];
-            s.0.l += p.l;
-            s.0.a += p.a;
-            s.0.b += p.b;
-            s.1 += 1;
-        }
-        let mut moved = false;
-        for (c, (s, n)) in centroids.iter_mut().zip(&sums) {
-            if *n > 0 {
-                let next = Lab { l: s.l / *n as f32, a: s.a / *n as f32, b: s.b / *n as f32 };
-                moved |= next.dist2(*c) > 1e-8;
-                *c = next;
+    // Edge strips: whole side, plus three segments along it.
+    let strip = |side: usize, from: u32, to: u32| -> Rgb {
+        let mut acc = [0f32; 3];
+        let mut n = 0f32;
+        for d in 0..D {
+            for i in from..to {
+                let p = match side {
+                    0 => px(i, d),
+                    1 => px(N - 1 - d, i),
+                    2 => px(i, N - 1 - d),
+                    _ => px(d, i),
+                };
+                for (a, v) in acc.iter_mut().zip(p) {
+                    *a += lin(v);
+                }
+                n += 1.0;
             }
         }
-        if !moved {
+        [unlin(acc[0] / n), unlin(acc[1] / n), unlin(acc[2] / n)]
+    };
+    let thirds = |side: usize| [strip(side, 0, N / 3), strip(side, N / 3, 2 * N / 3), strip(side, 2 * N / 3, N)];
+    let edges = Sides { t: strip(0, 0, N), r: strip(1, 0, N), b: strip(2, 0, N), l: strip(3, 0, N) };
+    let segments = Sides { t: thirds(0), r: thirds(1), b: thirds(2), l: thirds(3) };
+
+    // 3 bits per channel buckets.
+    #[derive(Clone, Copy, Default)]
+    struct Bucket {
+        n: u32,
+        sum: [u32; 3],
+    }
+    let mut buckets = vec![Bucket::default(); 512];
+    let (mut total_lum, mut sat_w) = (0f32, 0f32);
+    for p in small.pixels() {
+        let p = [p[0], p[1], p[2]];
+        let k = ((p[0] >> 5) as usize) << 6 | ((p[1] >> 5) as usize) << 3 | (p[2] >> 5) as usize;
+        let b = &mut buckets[k];
+        b.n += 1;
+        for (s, v) in b.sum.iter_mut().zip(p) {
+            *s += v as u32;
+        }
+        total_lum += color::luminance(p);
+        let (_, s, l) = rgb_to_hsl(p);
+        sat_w += s * (1.0 - (l - 0.5).abs() * 2.0);
+    }
+    let total = (N * N) as f32;
+    let mut list: Vec<Entry> = buckets
+        .iter()
+        .filter(|b| b.n > 0)
+        .map(|b| {
+            let c = [0, 1, 2].map(|i| (b.sum[i] as f32 / b.n as f32).round() as u8);
+            (c, b.n, rgb_to_hsl(c))
+        })
+        .collect();
+    list.sort_by_key(|e| std::cmp::Reverse(e.1));
+
+    let frac = |n: u32| n as f32 / total;
+    let best = |score: &dyn Fn(&Entry) -> Option<f32>| -> Rgb {
+        list.iter()
+            .filter_map(|e| score(e).map(|s| (e.0, s)))
+            .fold((list[0].0, -1.0f32), |b, (c, s)| if s > b.1 { (c, s) } else { b })
+            .0
+    };
+    let vibrant = best(&|e| {
+        let (_, s, l) = e.2;
+        (frac(e.1) >= 0.004).then(|| s * (1.0 - (l - 0.55).abs() * 1.6) * frac(e.1).powf(0.25))
+    });
+    let muted = best(&|e| {
+        let (_, s, l) = e.2;
+        (frac(e.1) >= 0.01).then(|| (0.5 - (s - 0.25).abs()) * (1.0 - (l - 0.4).abs()) * frac(e.1).powf(0.3))
+    });
+
+    Analysis {
+        edges,
+        segments,
+        dominant: list[0].0,
+        vibrant,
+        muted,
+        mean_lum: total_lum / total,
+        chroma: sat_w / total,
+        swatches: list.iter().take(6).map(|e| e.0).collect(),
+    }
+}
+
+/// Walk lightness in `dir` until contrast against `bg` reaches `target`.
+fn ensure(hsl: (f32, f32, f32), bg: Rgb, target: f32, dir: f32, fixes: &mut Vec<String>, role: &str) -> Rgb {
+    let (h, s, start) = hsl;
+    let mut l = start;
+    for _ in 0..80 {
+        if contrast(hsl_to_rgb(h, s, l), bg) >= target {
             break;
         }
+        l = (l + dir * 0.012).clamp(0.0, 1.0);
     }
+    if (l - start).abs() > 0.001 {
+        fixes.push(format!("{role} L {}->{}%", (start * 100.0).round(), (l * 100.0).round()));
+    }
+    hsl_to_rgb(h, s, l)
+}
 
-    let mut counts = vec![0usize; centroids.len()];
-    for &ci in &assign {
-        counts[ci] += 1;
+fn derive(a: &Analysis) -> Palette {
+    let mut fixes = Vec::new();
+    let gray = a.chroma < 0.07;
+    let light = a.mean_lum > 0.42;
+    let (dh, ds, _) = rgb_to_hsl(a.dominant);
+    let (vh, vsat, vl) = rgb_to_hsl(a.vibrant);
+    let hue = if ds > 0.15 { dh } else { vh };
+    let tint = if gray { 0.02 } else { ds.max(vsat * 0.5).min(0.42) };
+
+    let (bg, surface, surface2, text, subtle, accent);
+    if !light {
+        bg = hsl_to_rgb(hue, tint, 0.10);
+        surface = hsl_to_rgb(hue, tint, 0.15);
+        surface2 = hsl_to_rgb(hue, tint * 0.9, 0.21);
+        text = ensure((hue, tint * 0.35, 0.94), bg, 7.0, 1.0, &mut fixes, "text");
+        subtle = ensure((hue, tint * 0.3, 0.66), bg, 4.5, 1.0, &mut fixes, "textSubtle");
+        accent = if gray {
+            ensure((hue, 0.03, 0.8), bg, 4.5, 1.0, &mut fixes, "accent")
+        } else {
+            ensure((vh, vsat.clamp(0.55, 0.95), vl.clamp(0.52, 0.66)), bg, 4.5, 1.0, &mut fixes, "accent")
+        };
+    } else {
+        bg = hsl_to_rgb(hue, tint * 0.7, 0.95);
+        surface = hsl_to_rgb(hue, tint * 0.6, 0.985);
+        surface2 = hsl_to_rgb(hue, tint * 0.7, 0.89);
+        text = ensure((hue, tint * 0.5, 0.13), bg, 7.0, -1.0, &mut fixes, "text");
+        subtle = ensure((hue, tint * 0.4, 0.4), bg, 4.5, -1.0, &mut fixes, "textSubtle");
+        accent = if gray {
+            ensure((hue, 0.03, 0.28), bg, 4.5, -1.0, &mut fixes, "accent")
+        } else {
+            ensure((vh, vsat.clamp(0.55, 0.95), vl.clamp(0.32, 0.5)), bg, 4.5, -1.0, &mut fixes, "accent")
+        };
     }
-    centroids
-        .into_iter()
-        .zip(counts)
-        .filter(|(_, n)| *n > 0)
-        .map(|(centroid, n)| Cluster { centroid, population: n as f32 / pts.len() as f32 })
-        .collect()
+    const W: Rgb = [255, 255, 255];
+    const K: Rgb = [14, 14, 16];
+    let on_accent = if contrast(W, accent) >= contrast(K, accent) { W } else { K };
+
+    // Glow: saturate, clamp lightness; near-black edges cast no light, so mix
+    // them with the accent and dim them.
+    let mut dark_mixed = false;
+    let mut glow_of = |c: Rgb| -> (Rgb, f32) {
+        let (h, s, l) = rgb_to_hsl(c);
+        let dark = color::luminance(c) < 0.02;
+        let s = if gray { s } else { (s * 1.3).clamp(0.0, 1.0) };
+        let mut g = hsl_to_rgb(h, s, l.clamp(0.3, 0.72));
+        if dark {
+            g = mix_lin(g, accent, 0.5);
+            dark_mixed = true;
+        }
+        (g, if dark { 0.55 } else { 0.85 })
+    };
+    let (gt, at) = glow_of(a.edges.t);
+    let (gr, ar) = glow_of(a.edges.r);
+    let (gb, ab) = glow_of(a.edges.b);
+    let (gl, al) = glow_of(a.edges.l);
+    let glow_stops = Sides {
+        t: a.segments.t.map(|c| glow_of(c).0),
+        r: a.segments.r.map(|c| glow_of(c).0),
+        b: a.segments.b.map(|c| glow_of(c).0),
+        l: a.segments.l.map(|c| glow_of(c).0),
+    };
+    if dark_mixed {
+        fixes.push("glow: dark edge -> accent mix".into());
+    }
+    let edge = mix_lin(mix_lin(gt, gb, 0.5), mix_lin(gl, gr, 0.5), 0.5);
+
+    Palette {
+        scheme: if light { Scheme::Light } else { Scheme::Dark },
+        gray,
+        fallback: false,
+        ratios: Ratios {
+            text: contrast(text, bg),
+            subtle: contrast(subtle, bg),
+            accent: contrast(accent, bg),
+            on_accent: contrast(on_accent, accent),
+        },
+        roles: Roles { bg, surface, surface2, accent, on_accent, text, subtle, edge },
+        glow: Sides { t: gt, r: gr, b: gb, l: gl },
+        glow_a: Sides { t: at, r: ar, b: ab, l: al },
+        glow_stops,
+        dominant: a.dominant,
+        vibrant: a.vibrant,
+        muted: a.muted,
+        swatches: a.swatches.clone(),
+        fixes,
+    }
+}
+
+/// `#rrggbb` for a color.
+pub fn hex(c: Rgb) -> String {
+    format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])
+}
+
+impl Palette {
+    /// Compact tint for small thumbnails: (edge border, bottom glow).
+    pub fn tint(&self) -> (String, String) {
+        (hex(self.roles.edge), hex(self.glow.b))
+    }
+}
+
+/// The neutral graphite palette for tracks without art (spec A5).
+pub fn fallback() -> Palette {
+    let roles = Roles {
+        bg: [19, 19, 22],
+        surface: [28, 28, 32],
+        surface2: [40, 40, 46],
+        accent: [214, 214, 224],
+        on_accent: [14, 14, 16],
+        text: [238, 238, 242],
+        subtle: [158, 158, 170],
+        edge: [96, 96, 108],
+    };
+    let glow = Sides { t: [150, 150, 162], r: [140, 144, 160], b: [120, 120, 134], l: [160, 156, 166] };
+    Palette {
+        scheme: Scheme::Dark,
+        gray: true,
+        fallback: true,
+        ratios: Ratios {
+            text: contrast(roles.text, roles.bg),
+            subtle: contrast(roles.subtle, roles.bg),
+            accent: contrast(roles.accent, roles.bg),
+            on_accent: contrast(roles.on_accent, roles.accent),
+        },
+        glow_stops: Sides { t: [glow.t; 3], r: [glow.r; 3], b: [glow.b; 3], l: [glow.l; 3] },
+        glow,
+        glow_a: Sides { t: 0.4, r: 0.4, b: 0.4, l: 0.4 },
+        dominant: roles.bg,
+        vibrant: roles.accent,
+        muted: roles.surface2,
+        swatches: vec![],
+        fixes: vec![],
+        roles,
+    }
 }
 
 #[cfg(test)]
@@ -368,70 +357,64 @@ mod tests {
     use super::*;
     use image::{Rgb as Px, RgbImage};
 
-    fn hex_rgb(hex: &str) -> Rgb {
-        let v = u32::from_str_radix(&hex[1..], 16).unwrap();
-        Rgb::from_u8((v >> 16) as u8, (v >> 8) as u8, v as u8)
-    }
-
-    fn solid(r: u8, g: u8, b: u8) -> DynamicImage {
-        DynamicImage::ImageRgb8(RgbImage::from_pixel(64, 64, Px([r, g, b])))
+    fn img(f: impl Fn(u32, u32) -> [u8; 3]) -> DynamicImage {
+        DynamicImage::ImageRgb8(RgbImage::from_fn(300, 300, |x, y| Px(f(x, y))))
     }
 
     fn assert_contrast(p: &Palette) {
-        let bg = hex_rgb(&p.roles.background.hex);
-        assert!(hex_rgb(&p.roles.text.hex).contrast(bg) >= 7.0, "text contrast");
-        assert!(hex_rgb(&p.roles.text_subtle.hex).contrast(bg) >= 4.5, "subtle contrast");
-        assert!(hex_rgb(&p.roles.accent.hex).contrast(bg) >= 3.0, "accent contrast");
-        let acc = hex_rgb(&p.roles.accent.hex);
-        assert!(hex_rgb(&p.roles.on_accent.hex).contrast(acc) >= 4.5, "on-accent contrast");
+        let r = &p.roles;
+        assert!(contrast(r.text, r.bg) >= 7.0, "text {}", p.ratios.text);
+        assert!(contrast(r.subtle, r.bg) >= 4.5, "subtle {}", p.ratios.subtle);
+        assert!(contrast(r.accent, r.bg) >= 4.5, "accent {}", p.ratios.accent);
+        assert!(contrast(r.on_accent, r.accent) >= 4.5, "on-accent {}", p.ratios.on_accent);
     }
 
     #[test]
     fn edge_cases_meet_contrast() {
-        for img in [solid(0, 0, 0), solid(255, 255, 255), solid(128, 128, 128), solid(230, 20, 30), solid(255, 240, 0)] {
-            assert_contrast(&extract(&img));
+        for c in [[0, 0, 0], [255, 255, 255], [128, 128, 128], [214, 28, 40], [255, 240, 0], [20, 40, 200], [250, 180, 220]] {
+            assert_contrast(&extract(&img(|_, _| c)));
         }
         assert_contrast(&fallback());
     }
 
     #[test]
-    fn white_cover_is_light_scheme() {
-        assert_eq!(extract(&solid(250, 250, 250)).scheme, Scheme::Light);
-        assert_eq!(extract(&solid(10, 10, 30)).scheme, Scheme::Dark);
+    fn scheme_and_gray_detection() {
+        let white = extract(&img(|_, _| [246, 244, 240]));
+        assert_eq!(white.scheme, Scheme::Light);
+        assert!(white.gray);
+        let red = extract(&img(|_, _| [214, 28, 40]));
+        assert_eq!(red.scheme, Scheme::Dark);
+        assert!(!red.gray);
     }
 
     #[test]
-    fn edges_are_sampled_per_side() {
+    fn edges_and_segments_follow_the_art() {
         // Blue top half, orange bottom half.
-        let img = RgbImage::from_fn(64, 64, |_, y| if y < 32 { Px([20, 60, 220]) } else { Px([240, 130, 20]) });
-        let p = extract(&DynamicImage::ImageRgb8(img));
-        let top = p.edges.top.h;
-        let bottom = p.edges.bottom.h;
-        assert!((240.0..290.0).contains(&top), "top hue {top}");
-        assert!((40.0..80.0).contains(&bottom), "bottom hue {bottom}");
-        // The left side runs blue (top third) to orange (bottom third).
-        assert!((240.0..290.0).contains(&p.glow_stops.left[0].h), "left start {}", p.glow_stops.left[0].h);
-        assert!((40.0..80.0).contains(&p.glow_stops.left[2].h), "left end {}", p.glow_stops.left[2].h);
+        let p = extract(&img(|_, y| if y < 150 { [20, 60, 220] } else { [240, 130, 20] }));
+        let (th, _, _) = rgb_to_hsl(p.glow.t);
+        let (bh, _, _) = rgb_to_hsl(p.glow.b);
+        assert!((0.55..0.72).contains(&th), "top hue {th}");
+        assert!((0.04..0.14).contains(&bh), "bottom hue {bh}");
+        // The left edge runs blue -> orange top to bottom.
+        let (l0, _, _) = rgb_to_hsl(p.glow_stops.l[0]);
+        let (l2, _, _) = rgb_to_hsl(p.glow_stops.l[2]);
+        assert!((0.55..0.72).contains(&l0) && (0.04..0.14).contains(&l2), "{l0} {l2}");
     }
 
     #[test]
-    fn glow_follows_bright_lines_not_dark_background() {
-        // Navy cover with thin cyan lines: the border stays navy, the glow is cyan.
-        let img = RgbImage::from_fn(512, 512, |x, y| {
-            if x % 32 < 3 || y % 32 < 3 { Px([40, 220, 255]) } else { Px([12, 14, 40]) }
-        });
-        let p = extract(&DynamicImage::ImageRgb8(img));
-        assert!(p.edges.top.l < 0.3, "border keeps the true dominant edge color");
-        let g = &p.glow.top;
-        assert!((190.0..240.0).contains(&g.h) && g.c > 0.08, "glow is cyan, got {g:?}");
+    fn black_edges_take_the_accent() {
+        // Black sleeve with an orange center: edges glow orange, dimmed.
+        let p = extract(&img(|x, y| if (90..210).contains(&x) && (90..210).contains(&y) { [255, 120, 0] } else { [0, 0, 0] }));
+        assert_eq!(p.glow_a.t, 0.55);
+        let (h, s, _) = rgb_to_hsl(p.glow.t);
+        assert!(s > 0.3 && (0.03..0.14).contains(&h), "glow takes the orange accent: h {h} s {s}");
+        assert!(p.fixes.iter().any(|f| f.contains("accent mix")));
     }
 
     #[test]
-    fn vibrant_beats_dominant_grey() {
-        // Mostly grey with a red stripe: accent should be the red, not grey.
-        let img = RgbImage::from_fn(64, 64, |x, _| if x < 12 { Px([220, 30, 40]) } else { Px([120, 120, 120]) });
-        let p = extract(&DynamicImage::ImageRgb8(img));
-        assert!(p.vibrant.c > 0.1);
-        assert!(p.roles.accent.c > 0.08);
+    fn deterministic() {
+        let a = extract(&img(|x, y| [(x % 256) as u8, (y % 256) as u8, 90]));
+        let b = extract(&img(|x, y| [(x % 256) as u8, (y % 256) as u8, 90]));
+        assert_eq!(serde_json::to_string(&a).unwrap(), serde_json::to_string(&b).unwrap());
     }
 }

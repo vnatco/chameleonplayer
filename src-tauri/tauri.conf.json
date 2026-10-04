@@ -15,17 +15,22 @@
       {
         "label": "main",
         "title": "Chameleon Player",
-        "width": 1100,
-        "height": 760,
-        "minWidth": 640,
-        "minHeight": 480,
-        "dragDropEnabled": true
+        "width": 860,
+        "height": 860,
+        "transparent": true,
+        "decorations": false,
+        "shadow": false,
+        "resizable": false,
+        "visible": false,
+        "center": true,
+        "dragDropEnabled": true,
+        "skipTaskbar": false
       }
     ],
     "security": {
       "csp": {
         "default-src": "'self'",
-        "img-src": "'self' asset: http://asset.localhost data: blob:",
+        "img-src": "'self' asset: http://asset.localhost data: blob: https://coverartarchive.org https://*.archive.org",
         "style-src": "'self' 'unsafe-inline'",
         "font-src": "'self' data:",
         "connect-src": "ipc: http://ipc.localhost"
@@ -38,7 +43,9 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": [
+      "nsis"
+    ],
     "category": "Music",
     "shortDescription": "Cover-first, chameleon music player",
     "license": "Apache-2.0",

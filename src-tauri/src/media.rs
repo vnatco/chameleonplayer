@@ -1,28 +1,43 @@
 //! Windows media overlay (System Media Transport Controls) and media keys.
 //!
-//! Runs on its own thread: it receives player status updates, keeps the
-//! overlay's title/artist/cover and play state current, and turns media key
-//! presses into player commands.
+//! Runs on its own thread: it receives player status and position updates,
+//! keeps the overlay's title/artist/cover, play state and timeline current,
+//! and turns media key presses into player commands.
 
 use crate::audio::{self, AudioHandle, Command, PlayState, Status};
 use crate::library::{db, scan, Library};
 use crossbeam_channel::{Receiver, Sender};
 use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, MediaPosition, PlatformConfig, SeekDirection};
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// How far the "seek" media buttons jump when the OS doesn't say.
 const SEEK_STEP: f64 = 10.0;
+/// Timeline refresh while playing (spec E: "every ~5 s").
+const TIMELINE_EVERY: Duration = Duration::from_secs(5);
+
+enum Msg {
+    Status(Status),
+    Position(f64),
+    /// No-cover image for a track (rendered by the UI), so the overlay is
+    /// never blank.
+    Fallback { track: PathBuf, image: PathBuf },
+}
 
 #[derive(Clone)]
 pub struct MediaHandle {
-    tx: Sender<Status>,
+    tx: Sender<Msg>,
 }
 
 impl MediaHandle {
     pub fn update(&self, status: Status) {
-        let _ = self.tx.send(status);
+        let _ = self.tx.send(Msg::Status(status));
+    }
+
+    pub fn fallback(&self, track: PathBuf, image: PathBuf) {
+        let _ = self.tx.send(Msg::Fallback { track, image });
     }
 }
 
@@ -83,45 +98,72 @@ fn step(pos: f64, dir: SeekDirection, by: f64) -> f64 {
 }
 
 struct Shown {
-    path: Option<std::path::PathBuf>,
+    path: Option<PathBuf>,
+    duration: Option<f64>,
     state: Option<PlayState>,
+    timeline_at: Instant,
 }
 
-fn run(mut controls: MediaControls, rx: Receiver<Status>, library: &Library) {
-    let mut shown = Shown { path: None, state: None };
-    while let Ok(mut status) = rx.recv() {
-        // Only the latest status matters.
-        while let Ok(newer) = rx.try_recv() {
-            status = newer;
-        }
-        let path = status.track.as_ref().map(|t| t.path.clone());
-        if path != shown.path {
-            match &path {
-                Some(p) => set_metadata(&mut controls, library, p, status.duration),
-                None => {
-                    if let Err(e) = controls.set_metadata(MediaMetadata::default()) {
-                        log::warn!("media overlay: can't clear metadata: {e:?}");
+fn set_playback(controls: &mut MediaControls, state: PlayState, position: f64) {
+    let progress = Some(MediaPosition(Duration::from_secs_f64(position.max(0.0))));
+    let playback = match state {
+        PlayState::Playing => MediaPlayback::Playing { progress },
+        PlayState::Paused => MediaPlayback::Paused { progress },
+        PlayState::Stopped => MediaPlayback::Stopped,
+    };
+    if let Err(e) = controls.set_playback(playback) {
+        log::warn!("media overlay: can't set playback state: {e:?}");
+    }
+}
+
+fn run(mut controls: MediaControls, rx: Receiver<Msg>, library: &Library) {
+    let mut shown = Shown { path: None, duration: None, state: None, timeline_at: Instant::now() };
+    let mut fallbacks: HashMap<PathBuf, PathBuf> = HashMap::new();
+    let key = |p: &Path| crate::library::normalize_path(p);
+    while let Ok(msg) = rx.recv() {
+        match msg {
+            Msg::Status(status) => {
+                let path = status.track.as_ref().map(|t| t.path.clone());
+                if path != shown.path || status.duration != shown.duration {
+                    match &path {
+                        Some(p) => set_metadata(&mut controls, library, p, status.duration, fallbacks.get(&key(p))),
+                        None => {
+                            if let Err(e) = controls.set_metadata(MediaMetadata::default()) {
+                                log::warn!("media overlay: can't clear metadata: {e:?}");
+                            }
+                        }
+                    }
+                    shown.path = path;
+                    shown.duration = status.duration;
+                }
+                // Keep Paused vs Stopped exact, and the timeline in step.
+                set_playback(&mut controls, status.state, status.position);
+                shown.state = Some(status.state);
+                shown.timeline_at = Instant::now();
+            }
+            Msg::Position(pos) => {
+                if shown.state == Some(PlayState::Playing) && shown.timeline_at.elapsed() >= TIMELINE_EVERY {
+                    set_playback(&mut controls, PlayState::Playing, pos);
+                    shown.timeline_at = Instant::now();
+                }
+            }
+            Msg::Fallback { track, image } => {
+                let track = key(&track);
+                if fallbacks.len() > 64 {
+                    fallbacks.clear();
+                }
+                fallbacks.insert(track.clone(), image);
+                if let Some(p) = shown.path.clone() {
+                    if key(&p) == track {
+                        set_metadata(&mut controls, library, &p, shown.duration, fallbacks.get(&track));
                     }
                 }
             }
-            shown.path = path;
-        }
-        if shown.state != Some(status.state) || status.state != PlayState::Stopped {
-            let progress = Some(MediaPosition(Duration::from_secs_f64(status.position.max(0.0))));
-            let playback = match status.state {
-                PlayState::Playing => MediaPlayback::Playing { progress },
-                PlayState::Paused => MediaPlayback::Paused { progress },
-                PlayState::Stopped => MediaPlayback::Stopped,
-            };
-            if let Err(e) = controls.set_playback(playback) {
-                log::warn!("media overlay: can't set playback state: {e:?}");
-            }
-            shown.state = Some(status.state);
         }
     }
 }
 
-fn set_metadata(controls: &mut MediaControls, library: &Library, path: &Path, duration: Option<f64>) {
+fn set_metadata(controls: &mut MediaControls, library: &Library, path: &Path, duration: Option<f64>, fallback: Option<&PathBuf>) {
     let normalized = crate::library::normalize_path(path);
     let row = library.with(|c| db::track_by_path(c, &normalized.to_string_lossy())).ok().flatten();
     let (title, artist, album) = match &row {
@@ -133,10 +175,10 @@ fn set_metadata(controls: &mut MediaControls, library: &Library, path: &Path, du
     };
     let cover_url = match library.cover_for_path(path) {
         Ok(Some((cover, _))) => Some(format!("file://{}", cover.full)),
-        Ok(None) => None,
+        Ok(None) => fallback.map(|f| format!("file://{}", f.display())),
         Err(e) => {
             log::warn!("media overlay: no cover for {}: {e}", path.display());
-            None
+            fallback.map(|f| format!("file://{}", f.display()))
         }
     };
     let meta = MediaMetadata {
@@ -153,7 +195,12 @@ fn set_metadata(controls: &mut MediaControls, library: &Library, path: &Path, du
 
 /// Forward audio events to the overlay as well as the UI.
 pub fn forward(media: &Option<MediaHandle>, event: &audio::Event) {
-    if let (Some(m), audio::Event::Status(s)) = (media, event) {
-        m.update(s.clone());
+    let Some(m) = media else { return };
+    match event {
+        audio::Event::Status(s) => m.update(s.clone()),
+        audio::Event::Position { position, .. } => {
+            let _ = m.tx.send(Msg::Position(*position));
+        }
+        _ => {}
     }
 }
