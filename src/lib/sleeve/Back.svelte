@@ -27,7 +27,6 @@
         ]
       : [],
   );
-  const spine = $derived(now?.cover ? `url("${coverUrl(now.cover.thumb)}")` : "none");
 
   let list: HTMLDivElement | undefined = $state();
   // Keep the playing row in view when the queue opens.
@@ -40,7 +39,6 @@
 </script>
 
 <div class="back">
-  <div class="spine" style:background-image={spine}></div>
   <div class="head" data-drag>
     <div class="tabs" role="tablist">
       {#each tabs as [k, label] (k)}
@@ -127,17 +125,6 @@
     box-shadow: inset 0 0 0 1px var(--ch-edge);
     container-type: size;
   }
-  .spine {
-    position: absolute;
-    left: 0;
-    top: 0;
-    bottom: 0;
-    width: 5px;
-    background-color: var(--ch-edge);
-    background-size: cover;
-    background-position: right center;
-    opacity: 0.9;
-  }
   .head {
     display: flex;
     align-items: center;
@@ -193,7 +180,12 @@
     flex: 1;
     min-height: 0;
     overflow: auto;
+    scrollbar-color: transparent transparent;
+    transition: scrollbar-color 0.2s;
     padding: 12px 16px 14px;
+  }
+  .body:hover {
+    scrollbar-color: var(--ch-hairline) transparent;
   }
   .empty {
     font-size: 13px;

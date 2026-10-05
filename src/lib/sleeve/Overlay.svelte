@@ -4,6 +4,7 @@
   // reads as a shadow cast by the art.
   import Icon from "$lib/ui/Icon.svelte";
   import Seek from "$lib/ui/Seek.svelte";
+  import Slider from "$lib/ui/Slider.svelte";
   import { app, win } from "$lib/state.svelte";
 
   let { show, onlibrary }: { show: boolean; onlibrary: () => void } = $props();
@@ -23,6 +24,7 @@
   }
   function wheel(e: WheelEvent) {
     e.preventDefault();
+    volIn();
     app.setVolume(vol - Math.sign(e.deltaY) * 0.05);
   }
   $effect(() => {
@@ -63,24 +65,17 @@
         </button>
         <button class="ib t" onclick={() => app.next()} aria-label="Next" title="Next (N)"><Icon name="next" stroke={1.8} /></button>
       </div>
-      <div class="right" role="group" onmouseenter={volIn} onmouseleave={volOut} onwheel={wheel}>
-        {#if volOpen}
-          <div class="vol">
-            <div class="volbox">
-              <input
-                type="range"
-                min="0"
-                max="100"
-                value={Math.round(vol * 100)}
-                oninput={(e) => app.setVolume(+e.currentTarget.value / 100)}
-                aria-label="Volume"
-              />
-            </div>
+      <div class="right">
+        <!-- Only the pill itself reacts: the icon, and the slider once it's out. -->
+        <div class="vol" class:open={volOpen} role="group" aria-label="Volume" onmouseenter={volIn} onmouseleave={volOut} onwheel={wheel} onfocusin={volIn} onfocusout={volOut}>
+          <div class="cap">
+            <span class="pct">{Math.round(vol * 100)}</span>
+            <Slider vertical value={vol} label="Volume" ring="var(--ch-surface-2)" oninput={(v) => app.setVolume(v)} />
           </div>
-        {/if}
-        <button class="ib" onclick={() => app.toggleMute()} aria-label={vol > 0 ? "Mute" : "Unmute"} title="Volume (Scroll to Adjust)">
-          <Icon name={vol > 0 ? "volume" : "mute"} />
-        </button>
+          <button class="ib vb" onclick={() => app.toggleMute()} aria-label={vol > 0 ? "Mute" : "Unmute"} title="Volume (Scroll to Adjust)">
+            <Icon name={vol > 0 ? "volume" : "mute"} />
+          </button>
+        </div>
       </div>
     </div>
   </div>
@@ -206,34 +201,66 @@
     justify-content: flex-end;
     align-items: center;
   }
-  .right .ib {
-    padding: 7px;
-  }
+  /* A capsule that rises out of the speaker button: button and slider are
+     one shape, so the pointer never crosses a gap. */
   .vol {
-    position: absolute;
-    right: 0;
-    bottom: 32px;
-    padding-bottom: 6px;
-  }
-  .volbox {
-    width: 32px;
-    height: 120px;
+    position: relative;
     display: flex;
+    flex-direction: column;
     align-items: center;
-    justify-content: center;
-    border-radius: 4px;
-    background: var(--ch-surface-2);
-    box-shadow:
-      0 0 0 1px var(--ch-hairline),
-      0 8px 20px rgb(0 0 0 / 0.3);
-    animation: chFadeIn 0.14s ease-out both;
+    width: 32px;
+    border-radius: 16px;
+    transition: background-color 0.16s;
   }
-  .volbox input {
-    writing-mode: vertical-lr;
-    direction: rtl;
-    width: 16px;
-    height: 100px;
-    accent-color: var(--ch-accent);
-    margin: 0;
+  .vol.open {
+    background: var(--ch-surface-2);
+    box-shadow: 0 0 0 1px var(--ch-hairline), 0 10px 24px rgb(0 0 0 / 0.3);
+    text-shadow: none;
+  }
+  .cap {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 100%;
+    height: clamp(96px, 34cqw, 132px);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    padding: 12px 0 8px;
+    border-radius: 16px 16px 0 0;
+    background: var(--ch-surface-2);
+    box-shadow: 0 -1px 0 0 var(--ch-hairline), 1px 0 0 0 var(--ch-hairline), -1px 0 0 0 var(--ch-hairline);
+    opacity: 0;
+    transform: scaleY(0.6);
+    transform-origin: center bottom;
+    pointer-events: none;
+    transition:
+      opacity 0.14s ease-out,
+      transform 0.18s var(--ease-out);
+  }
+  .vol.open .cap {
+    opacity: 1;
+    transform: none;
+    pointer-events: auto;
+  }
+  .vol.open {
+    border-top-left-radius: 0;
+    border-top-right-radius: 0;
+  }
+  .cap :global(.slider.vertical) {
+    flex: 1;
+  }
+  .pct {
+    font-size: 10.5px;
+    font-variant-numeric: tabular-nums;
+    color: var(--ch-text-subtle);
+  }
+  .vb {
+    padding: 7px;
+    border-radius: 16px;
+  }
+  .vol.open .vb:hover {
+    background: transparent;
   }
 </style>

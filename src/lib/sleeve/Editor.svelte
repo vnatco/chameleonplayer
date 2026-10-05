@@ -301,10 +301,14 @@
     flex: 1;
     min-height: 0;
     overflow: auto;
+    scrollbar-color: transparent transparent;
     padding: 12px 16px 14px;
     display: flex;
     flex-direction: column;
     gap: 12px;
+  }
+  .body:hover {
+    scrollbar-color: var(--ch-hairline) transparent;
   }
   .top {
     display: flex;

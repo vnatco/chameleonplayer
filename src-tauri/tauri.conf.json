@@ -55,6 +55,87 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "publisher": "vnat.co",
+    "homepage": "https://github.com/vnatco/chameleon_player",
+    "copyright": "Copyright 2026 Vladimer Natchkepia",
+    "longDescription": "A cover-first music player for Windows. The album cover is the player, and the whole interface takes its colors from the artwork.",
+    "fileAssociations": [
+      {
+        "ext": [
+          "mp3"
+        ],
+        "name": "ChameleonPlayer.MP3",
+        "description": "MP3 Audio",
+        "role": "Viewer",
+        "mimeType": "audio/mpeg"
+      },
+      {
+        "ext": [
+          "m4a",
+          "m4b"
+        ],
+        "name": "ChameleonPlayer.M4A",
+        "description": "MPEG-4 Audio",
+        "role": "Viewer",
+        "mimeType": "audio/mp4"
+      },
+      {
+        "ext": [
+          "flac"
+        ],
+        "name": "ChameleonPlayer.FLAC",
+        "description": "FLAC Audio",
+        "role": "Viewer",
+        "mimeType": "audio/flac"
+      },
+      {
+        "ext": [
+          "ogg",
+          "oga"
+        ],
+        "name": "ChameleonPlayer.OGG",
+        "description": "Ogg Vorbis Audio",
+        "role": "Viewer",
+        "mimeType": "audio/ogg"
+      },
+      {
+        "ext": [
+          "wav"
+        ],
+        "name": "ChameleonPlayer.WAV",
+        "description": "WAV Audio",
+        "role": "Viewer",
+        "mimeType": "audio/wav"
+      },
+      {
+        "ext": [
+          "aac"
+        ],
+        "name": "ChameleonPlayer.AAC",
+        "description": "AAC Audio",
+        "role": "Viewer",
+        "mimeType": "audio/aac"
+      },
+      {
+        "ext": [
+          "aif",
+          "aiff",
+          "aifc"
+        ],
+        "name": "ChameleonPlayer.AIFF",
+        "description": "AIFF Audio",
+        "role": "Viewer",
+        "mimeType": "audio/aiff"
+      }
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "both",
+        "installerIcon": "icons/icon.ico",
+        "displayLanguageSelector": false,
+        "installerHooks": "windows/hooks.nsh"
+      }
+    }
   }
 }

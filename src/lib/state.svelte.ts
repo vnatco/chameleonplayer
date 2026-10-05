@@ -47,13 +47,15 @@ export interface UiSettings {
   playerPos?: { x: number; y: number };
   libFrame?: { x: number; y: number; w: number; h: number };
   premute?: number;
+  /** Settings layout version, for one-time migrations. */
+  v?: number;
 }
 
 const DEFAULT_UI: UiSettings = {
   glow: 0.75,
   strength: 1,
   size: "normal",
-  onTop: true,
+  onTop: false,
   remember: true,
   pulse: false,
   anim: true,
@@ -165,6 +167,11 @@ class AppState {
   loadUi(raw: Record<string, unknown>) {
     const ui = { ...DEFAULT_UI, ...(raw as Partial<UiSettings>) };
     if (!["mini", "normal", "large"].includes(ui.size)) ui.size = "normal";
+    // v2: Always on Top became opt-in.
+    if ((ui.v ?? 1) < 2) {
+      ui.onTop = false;
+      ui.v = 2;
+    }
     this.ui = ui;
   }
 
@@ -374,6 +381,15 @@ class AppState {
     }
     this.flipped = !this.flipped;
     this.applyPalette(this.anim ? 560 : 200);
+  }
+
+  /** Step through Mini, Normal, Large (dir +1 grows, -1 shrinks). */
+  stepSize(dir: 1 | -1, wrap = false) {
+    const order: Size[] = ["mini", "normal", "large"];
+    let i = order.indexOf(this.ui.size) + dir;
+    if (wrap) i = (i + order.length) % order.length;
+    if (i < 0 || i >= order.length) return;
+    this.setSize(order[i]);
   }
 
   setSize(size: Size) {

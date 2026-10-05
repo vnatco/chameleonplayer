@@ -47,6 +47,19 @@
   const mini = $derived(app.ui.size === "mini" && !inLibrary);
   const showCtl = $derived(!inLibrary && !flipped && !drop && !app.loading && ((hover && !idle) || focusIn));
 
+  // Switching animations on/off must not replay the flip: drop transitions
+  // for a couple of frames while the styles change.
+  let instant = $state(false);
+  let lastAnim: boolean | null = null;
+  $effect(() => {
+    const a = app.anim;
+    if (lastAnim !== null && a !== lastAnim) {
+      instant = true;
+      requestAnimationFrame(() => requestAnimationFrame(() => (instant = false)));
+    }
+    lastAnim = a;
+  });
+
   // Keep the back mounted through the flip-back turn.
   let backMounted = $state(false);
   let backTimer: ReturnType<typeof setTimeout> | undefined;
@@ -108,8 +121,19 @@
   function dblclick(e: MouseEvent) {
     if (inLibrary || flipped) return;
     if ((e.target as HTMLElement).closest("button, input, [role=slider]")) return;
-    app.setSize(app.ui.size === "large" ? "normal" : "large");
+    // Mini -> Normal -> Large -> Mini.
+    app.stepSize(1, true);
   }
+  // Ctrl + wheel resizes the sleeve.
+  function wheel(e: WheelEvent) {
+    if (!e.ctrlKey || inLibrary) return;
+    e.preventDefault();
+    const now = performance.now();
+    if (now - lastWheel < 300) return;
+    lastWheel = now;
+    app.stepSize(e.deltaY < 0 ? 1 : -1);
+  }
+  let lastWheel = 0;
 
   const zones = $derived(
     drop?.kind === "image"
@@ -133,6 +157,7 @@
   onmousemove={mousemove}
   onmouseup={() => (downAt = null)}
   ondblclick={dblclick}
+  onwheel={wheel}
   onfocusin={(e) => {
     if ((e.target as HTMLElement).matches?.(":focus-visible")) focusIn = true;
   }}
@@ -141,7 +166,7 @@
   <Glow reach={glowReach} opacity={glowOpacity} breathing={pausedLook && !app.loading} pulse={app.ui.pulse && app.playing} level={() => app.level} {dip} anim={app.anim} />
 
   <div class="persp">
-    <div class="flipper" class:flipped class:still={!app.anim}>
+    <div class="flipper" class:flipped class:still={!app.anim} class:instant>
       <div class="face front" class:hidden={flipped}>
         <div class="bg"></div>
         {#if app.slots.a}<img class="art" class:on={app.slots.front === "a"} src={app.slots.a} alt="" draggable="false" />{/if}
@@ -216,6 +241,10 @@
   }
   .flipper.flipped {
     transform: rotateY(180deg);
+  }
+  .flipper.instant,
+  .flipper.instant .face {
+    transition: none !important;
   }
   .face {
     position: absolute;

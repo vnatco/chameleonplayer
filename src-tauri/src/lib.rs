@@ -91,6 +91,7 @@ pub fn run() {
             window::window_toggle_maximize,
             window::window_show,
             commands::shell_update,
+            commands::open_default_apps,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Chameleon Player");

@@ -1,6 +1,7 @@
 <script lang="ts">
   // Back of the sleeve, Settings tab (spec C4).
   import Segmented from "$lib/ui/Segmented.svelte";
+  import Slider from "$lib/ui/Slider.svelte";
   import Toggle from "$lib/ui/Toggle.svelte";
   import { app, type Size } from "$lib/state.svelte";
 
@@ -19,26 +20,12 @@
 <div class="settings">
   <div>
     <div class="head"><span>Glow</span><span class="subtle">{glowLabel}</span></div>
-    <input
-      type="range"
-      min="0"
-      max="100"
-      value={Math.round(app.ui.glow * 100)}
-      oninput={(e) => app.setUi("glow", +e.currentTarget.value / 100)}
-      aria-label="Glow Intensity"
-    />
+    <Slider value={app.ui.glow} label="Glow Intensity" valueText={glowLabel} oninput={(v) => app.setUi("glow", v)} />
     <div class="ends subtle"><span>Crisp</span><span>Full Glow</span></div>
   </div>
   <div>
     <div class="head"><span>Palette Strength</span><span class="subtle">{strengthLabel}</span></div>
-    <input
-      type="range"
-      min="0"
-      max="100"
-      value={Math.round(app.ui.strength * 100)}
-      oninput={(e) => app.setUi("strength", +e.currentTarget.value / 100)}
-      aria-label="Palette Strength"
-    />
+    <Slider value={app.ui.strength} label="Palette Strength" valueText={strengthLabel} oninput={(v) => app.setUi("strength", v)} />
     <div class="ends subtle"><span>Subtle</span><span>Full Chameleon</span></div>
   </div>
   <div>
@@ -78,10 +65,8 @@
     font-size: 12.5px;
     margin-bottom: 4px;
   }
-  input[type="range"] {
+  .settings :global(.slider) {
     width: 100%;
-    accent-color: var(--ch-accent);
-    margin: 0;
   }
   .ends {
     display: flex;

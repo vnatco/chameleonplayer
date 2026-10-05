@@ -17,6 +17,7 @@
   import Library from "$lib/library/Library.svelte";
   import Sleeve, { type DropState } from "$lib/sleeve/Sleeve.svelte";
   import Icon from "$lib/ui/Icon.svelte";
+  import ContextMenu, { type MenuItem } from "$lib/ui/ContextMenu.svelte";
   import { renderFallback, updateShell } from "$lib/shell";
 
   const MORPH_MS = 460;
@@ -30,6 +31,8 @@
   /** Morph phase: "start" = old geometry, no transition; "run" = animating to the new one. */
   let morph = $state<{ dir: "expand" | "collapse"; phase: "start" | "run"; from: Rect } | null>(null);
   let library: Library | undefined = $state();
+  let menu = $state<{ x: number; y: number } | null>(null);
+  let menuRect = $state<Rect | null>(null);
 
   const S = $derived(SIZES[app.ui.size]);
   const off = $derived((PLAYER_WIN - S) / 2);
@@ -72,6 +75,7 @@
   // ---- Click-through regions --------------------------------------------------
   $effect(() => {
     const rects: Rect[] = app.mode === "library" || morph ? [{ x: 0, y: 0, w: 10000, h: 10000 }] : [playerRect];
+    if (menu && menuRect) rects.push(menuRect);
     api.windowHit(rects).catch(() => {});
   });
 
@@ -148,6 +152,51 @@
     setTimeout(() => app.flip("edit"), (app.anim ? MORPH_MS : 0) + 80);
   }
 
+  // ---- Right-click menu ------------------------------------------------------
+  function onContextMenu(e: MouseEvent) {
+    const t = e.target as HTMLElement;
+    // Text fields keep the system menu (cut, copy, paste).
+    if (t.closest("input, textarea, [contenteditable]")) return;
+    e.preventDefault();
+    if (app.mode === "player") {
+      const r = playerRect;
+      if (e.clientX < r.x || e.clientY < r.y || e.clientX >= r.x + r.w || e.clientY >= r.y + r.h) return;
+    }
+    menuRect = null;
+    menu = { x: e.clientX, y: e.clientY };
+  }
+  const menuItems = $derived.by((): MenuItem[] => {
+    const player = app.mode === "player";
+    const hasTrack = !!app.status?.track;
+    const items: MenuItem[] = [
+      { kind: "item", label: app.playing ? "Pause" : "Play", hint: "Space", disabled: !app.status?.queueLen, action: () => app.toggle() },
+      { kind: "item", label: "Next", hint: "N", disabled: !hasTrack, action: () => app.next() },
+      { kind: "item", label: "Previous", disabled: !hasTrack, action: () => app.prev() },
+      { kind: "sep" },
+    ];
+    if (player) {
+      items.push(
+        { kind: "label", label: "Window Size" },
+        { kind: "item", label: "Mini", hint: "1", checked: app.ui.size === "mini", action: () => app.setSize("mini") },
+        { kind: "item", label: "Normal", hint: "2", checked: app.ui.size === "normal", action: () => app.setSize("normal") },
+        { kind: "item", label: "Large", hint: "3", checked: app.ui.size === "large", action: () => app.setSize("large") },
+        { kind: "sep" },
+        { kind: "item", label: app.flipped ? "Flip to Cover" : "Flip to Back", hint: "F", action: () => app.flip() },
+        { kind: "item", label: "Edit Tags", disabled: !hasTrack, action: () => (app.flipped ? (app.backTab = "edit") : app.flip("edit")) },
+        { kind: "item", label: "Open Library", hint: "L", action: () => expand() },
+      );
+    } else {
+      items.push({ kind: "item", label: "Back to Player", hint: "Esc", action: () => collapse() });
+    }
+    items.push(
+      { kind: "sep" },
+      { kind: "item", label: "Always on Top", checked: app.ui.onTop, action: () => app.setUi("onTop", !app.ui.onTop) },
+      { kind: "item", label: "Minimize", action: () => win.minimize() },
+      { kind: "item", label: "Close", action: () => win.close() },
+    );
+    return items;
+  });
+
   // ---- Keyboard (spec H) ----------------------------------------------------
   function onKey(e: KeyboardEvent) {
     const t = e.target as HTMLElement;
@@ -196,6 +245,15 @@
       case "l":
       case "L":
         toggleLibrary();
+        break;
+      case "1":
+        if (app.mode === "player") app.setSize("mini");
+        break;
+      case "2":
+        if (app.mode === "player") app.setSize("normal");
+        break;
+      case "3":
+        if (app.mode === "player") app.setSize("large");
         break;
     }
   }
@@ -448,7 +506,7 @@
   });
 </script>
 
-<svelte:window onkeydown={onKey} />
+<svelte:window onkeydown={onKey} oncontextmenu={onContextMenu} />
 
 <div class="stage" class:ready={app.ready}>
   {#if app.mode === "library" || morph}
@@ -462,6 +520,20 @@
   <div class="sleeve-pos" style={sleeveStyle}>
     <Sleeve inLibrary={app.mode === "library" && morph?.dir !== "collapse"} {drop} {pointerInside} onlibrary={expand} />
   </div>
+
+  {#if menu}
+    <ContextMenu
+      x={menu.x}
+      y={menu.y}
+      items={menuItems}
+      bounds={{ w: window.innerWidth, h: window.innerHeight }}
+      onclose={() => {
+        menu = null;
+        menuRect = null;
+      }}
+      onrect={(r) => (menuRect = r)}
+    />
+  {/if}
 
   {#if app.toast}
     {#key app.toast.id}

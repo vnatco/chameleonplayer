@@ -8,6 +8,7 @@
   import { app, win, type LibView } from "$lib/state.svelte";
   import Icon from "$lib/ui/Icon.svelte";
   import Seek from "$lib/ui/Seek.svelte";
+  import Slider from "$lib/ui/Slider.svelte";
   import AlbumsView from "./AlbumsView.svelte";
   import AlbumView from "./AlbumView.svelte";
   import ArtistsView from "./ArtistsView.svelte";
@@ -255,14 +256,7 @@
       <button class="vi" onclick={() => app.toggleMute()} aria-label={(app.status?.volume ?? 0) > 0 ? "Mute" : "Unmute"}>
         <Icon name={(app.status?.volume ?? 0) > 0 ? "volume" : "mute"} />
       </button>
-      <input
-        type="range"
-        min="0"
-        max="100"
-        value={Math.round((app.status?.volume ?? 0) * 100)}
-        oninput={(e) => app.setVolume(+e.currentTarget.value / 100)}
-        aria-label="Volume"
-      />
+      <Slider value={app.status?.volume ?? 0} label="Volume" oninput={(v) => app.setVolume(v)} />
     </div>
     {#if upNext.length}
       <div class="eyebrow upn">Up Next</div>
@@ -584,12 +578,7 @@
     color: var(--ch-text-subtle);
     cursor: pointer;
   }
-  .vol input {
-    flex: 1;
-    accent-color: var(--ch-accent);
-    height: 16px;
-    margin: 0;
-  }
+
   .upn {
     margin-top: 8px;
   }
