@@ -18,6 +18,7 @@
   import Sleeve, { type DropState } from "$lib/sleeve/Sleeve.svelte";
   import Icon from "$lib/ui/Icon.svelte";
   import ContextMenu, { type MenuItem } from "$lib/ui/ContextMenu.svelte";
+  import Slider from "$lib/ui/Slider.svelte";
   import { renderFallback, updateShell } from "$lib/shell";
 
   const MORPH_MS = 460;
@@ -38,6 +39,17 @@
   const off = $derived((PLAYER_WIN - S) / 2);
   const playerRect = $derived<Rect>({ x: off, y: off, w: S, h: S });
   const showLibrary = $derived(app.mode === "library" && morph?.dir !== "collapse");
+
+  // Volume capsule: floats just outside the sleeve's right edge, bottom
+  // aligned with the speaker button, so it never covers the controls.
+  const VOL_GAP = 10;
+  const VOL_W = 36;
+  const volH = $derived(Math.max(120, Math.min(160, S * 0.42)));
+  const volShown = $derived(app.volOpen && app.mode === "player" && !morph && !app.flipped && app.ui.size !== "mini");
+  const volRect = $derived<Rect>({ x: playerRect.x + S + VOL_GAP, y: playerRect.y + S - volH, w: VOL_W, h: volH });
+  $effect(() => {
+    if (app.flipped || app.mode !== "player" || app.ui.size === "mini") app.volOpen = false;
+  });
 
   // ---- Sleeve geometry ------------------------------------------------------
   const sleeveStyle = $derived.by(() => {
@@ -76,6 +88,8 @@
   $effect(() => {
     const rects: Rect[] = app.mode === "library" || morph ? [{ x: 0, y: 0, w: 10000, h: 10000 }] : [playerRect];
     if (menu && menuRect) rects.push(menuRect);
+    // The capsule plus the gap to the sleeve, so the pointer can cross it.
+    if (volShown) rects.push({ x: playerRect.x + S, y: volRect.y, w: VOL_GAP + VOL_W, h: volRect.h });
     api.windowHit(rects).catch(() => {});
   });
 
@@ -521,6 +535,27 @@
     <Sleeve inLibrary={app.mode === "library" && morph?.dir !== "collapse"} {drop} {pointerInside} onlibrary={expand} />
   </div>
 
+  {#if volShown}
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="volcap"
+      style:left="{volRect.x}px"
+      style:top="{volRect.y}px"
+      style:width="{VOL_W}px"
+      style:height="{volRect.h}px"
+      onmouseenter={() => app.volIn()}
+      onmouseleave={() => app.volOut()}
+      onwheel={(e) => {
+        e.preventDefault();
+        app.setVolume((app.status?.volume ?? 0) - Math.sign(e.deltaY) * 0.05);
+      }}
+    >
+      <div class="bridge"></div>
+      <span class="pct">{Math.round((app.status?.volume ?? 0) * 100)}</span>
+      <Slider vertical value={app.status?.volume ?? 0} label="Volume" ring="var(--ch-surface-2)" wheel={false} oninput={(v) => app.setVolume(v)} />
+    </div>
+  {/if}
+
   {#if menu}
     <ContextMenu
       x={menu.x}
@@ -580,6 +615,48 @@
     position: absolute;
     transform-origin: 0 0;
     z-index: 2;
+  }
+  .volcap {
+    position: absolute;
+    z-index: 5;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 0 14px;
+    border-radius: 18px;
+    background: var(--ch-surface-2);
+    box-shadow:
+      0 0 0 1px var(--ch-hairline),
+      0 12px 30px rgb(0 0 0 / 0.35);
+    transform-origin: left bottom;
+    animation: volIn 0.18s var(--ease-out) both;
+  }
+  .volcap :global(.slider.vertical) {
+    flex: 1 1 auto;
+  }
+  /* Invisible strip over the gap, so moving from the button doesn't close it. */
+  .bridge {
+    position: absolute;
+    right: 100%;
+    top: 0;
+    bottom: 0;
+    width: 12px;
+  }
+  .pct {
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    color: var(--ch-text-subtle);
+  }
+  @keyframes volIn {
+    from {
+      opacity: 0;
+      transform: translateX(-6px) scale(0.96);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
   }
   .toast {
     position: absolute;

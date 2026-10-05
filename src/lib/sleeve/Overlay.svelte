@@ -4,32 +4,18 @@
   // reads as a shadow cast by the art.
   import Icon from "$lib/ui/Icon.svelte";
   import Seek from "$lib/ui/Seek.svelte";
-  import Slider from "$lib/ui/Slider.svelte";
   import { app, win } from "$lib/state.svelte";
 
   let { show, onlibrary }: { show: boolean; onlibrary: () => void } = $props();
 
-  let volOpen = $state(false);
-  let volTimer: ReturnType<typeof setTimeout> | undefined;
   const vol = $derived(app.status?.volume ?? 0);
   const large = $derived(app.ui.size === "large");
 
-  function volIn() {
-    clearTimeout(volTimer);
-    volOpen = true;
-  }
-  function volOut() {
-    clearTimeout(volTimer);
-    volTimer = setTimeout(() => (volOpen = false), 220);
-  }
   function wheel(e: WheelEvent) {
     e.preventDefault();
-    volIn();
+    app.volIn();
     app.setVolume(vol - Math.sign(e.deltaY) * 0.05);
   }
-  $effect(() => {
-    if (!show) volOpen = false;
-  });
 </script>
 
 <div class="ovl" class:show aria-hidden={!show}>
@@ -67,12 +53,8 @@
       </div>
       <div class="right">
         <!-- Only the pill itself reacts: the icon, and the slider once it's out. -->
-        <div class="vol" class:open={volOpen} role="group" aria-label="Volume" onmouseenter={volIn} onmouseleave={volOut} onwheel={wheel} onfocusin={volIn} onfocusout={volOut}>
-          <div class="cap">
-            <span class="pct">{Math.round(vol * 100)}</span>
-            <Slider vertical value={vol} label="Volume" ring="var(--ch-surface-2)" oninput={(v) => app.setVolume(v)} />
-          </div>
-          <button class="ib vb" onclick={() => app.toggleMute()} aria-label={vol > 0 ? "Mute" : "Unmute"} title="Volume (Scroll to Adjust)">
+        <div class="vol" role="group" aria-label="Volume" onmouseenter={() => app.volIn()} onmouseleave={() => app.volOut()} onwheel={wheel}>
+          <button class="ib vb" class:open={app.volOpen} onclick={() => app.toggleMute()} onfocus={() => app.volIn()} onblur={() => app.volOut()} aria-label={vol > 0 ? "Mute" : "Unmute"} title="Volume (Scroll to Adjust)">
             <Icon name={vol > 0 ? "volume" : "mute"} />
           </button>
         </div>
@@ -201,66 +183,13 @@
     justify-content: flex-end;
     align-items: center;
   }
-  /* A capsule that rises out of the speaker button: button and slider are
-     one shape, so the pointer never crosses a gap. */
   .vol {
-    position: relative;
     display: flex;
-    flex-direction: column;
-    align-items: center;
-    width: 32px;
-    border-radius: 16px;
-    transition: background-color 0.16s;
-  }
-  .vol.open {
-    background: var(--ch-surface-2);
-    box-shadow: 0 0 0 1px var(--ch-hairline), 0 10px 24px rgb(0 0 0 / 0.3);
-    text-shadow: none;
-  }
-  .cap {
-    position: absolute;
-    left: 0;
-    right: 0;
-    bottom: 100%;
-    height: clamp(96px, 34cqw, 132px);
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 6px;
-    padding: 12px 0 8px;
-    border-radius: 16px 16px 0 0;
-    background: var(--ch-surface-2);
-    box-shadow: 0 -1px 0 0 var(--ch-hairline), 1px 0 0 0 var(--ch-hairline), -1px 0 0 0 var(--ch-hairline);
-    opacity: 0;
-    transform: scaleY(0.6);
-    transform-origin: center bottom;
-    pointer-events: none;
-    transition:
-      opacity 0.14s ease-out,
-      transform 0.18s var(--ease-out);
-  }
-  .vol.open .cap {
-    opacity: 1;
-    transform: none;
-    pointer-events: auto;
-  }
-  .vol.open {
-    border-top-left-radius: 0;
-    border-top-right-radius: 0;
-  }
-  .cap :global(.slider.vertical) {
-    flex: 1;
-  }
-  .pct {
-    font-size: 10.5px;
-    font-variant-numeric: tabular-nums;
-    color: var(--ch-text-subtle);
   }
   .vb {
     padding: 7px;
-    border-radius: 16px;
   }
-  .vol.open .vb:hover {
-    background: transparent;
+  .vb.open {
+    background: var(--ch-hairline);
   }
 </style>

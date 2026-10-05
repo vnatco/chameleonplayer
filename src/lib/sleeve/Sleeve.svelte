@@ -45,7 +45,7 @@
 
   const flipped = $derived(app.flipped && !inLibrary);
   const mini = $derived(app.ui.size === "mini" && !inLibrary);
-  const showCtl = $derived(!inLibrary && !flipped && !drop && !app.loading && ((hover && !idle) || focusIn));
+  const showCtl = $derived(!inLibrary && !flipped && !drop && !app.loading && ((hover && !idle) || focusIn || app.volOpen));
 
   // Switching animations on/off must not replay the flip: drop transitions
   // for a couple of frames while the styles change.

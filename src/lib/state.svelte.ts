@@ -113,6 +113,18 @@ class AppState {
   libraryVersion = $state(0);
 
   toast = $state<{ id: number; text: string; error: boolean } | null>(null);
+  /** The volume capsule beside the sleeve. */
+  volOpen = $state(false);
+  private volTimer: ReturnType<typeof setTimeout> | undefined;
+
+  volIn() {
+    clearTimeout(this.volTimer);
+    this.volOpen = true;
+  }
+  volOut(delay = 260) {
+    clearTimeout(this.volTimer);
+    this.volTimer = setTimeout(() => (this.volOpen = false), delay);
+  }
 
   driver: PaletteDriver | null = null;
   private toastTimer: ReturnType<typeof setTimeout> | undefined;
