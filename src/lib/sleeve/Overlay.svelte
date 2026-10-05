@@ -4,6 +4,7 @@
   // reads as a shadow cast by the art.
   import Icon from "$lib/ui/Icon.svelte";
   import Seek from "$lib/ui/Seek.svelte";
+  import Slider from "$lib/ui/Slider.svelte";
   import { app, win } from "$lib/state.svelte";
 
   let { show, onlibrary }: { show: boolean; onlibrary: () => void } = $props();
@@ -39,6 +40,15 @@
   </div>
 
   <div class="foot">
+    {#if app.volOpen}
+      <!-- Above the seek bar, over the art only; the bridge spans the seek row
+           so moving up from the speaker button doesn't close it. -->
+      <div class="volcap" role="group" aria-label="Volume" onmouseenter={() => app.volIn()} onmouseleave={() => app.volOut()} onwheel={wheel}>
+        <span class="pct">{Math.round(vol * 100)}</span>
+        <Slider vertical value={vol} label="Volume" ring="var(--ch-surface-2)" wheel={false} oninput={(v) => app.setVolume(v)} />
+        <div class="bridge"></div>
+      </div>
+    {/if}
     <Seek />
     <div class="row">
       <div class="left">
@@ -185,6 +195,51 @@
   }
   .vol {
     display: flex;
+  }
+  .volcap {
+    position: absolute;
+    right: clamp(12px, 4cqw, 22px);
+    bottom: calc(100% + 10px);
+    width: 32px;
+    height: clamp(96px, 36cqw, 150px);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 0 14px;
+    border-radius: 16px;
+    background: var(--ch-surface-2);
+    box-shadow:
+      0 0 0 1px var(--ch-hairline),
+      0 10px 26px rgb(0 0 0 / 0.35);
+    text-shadow: none;
+    transform-origin: center bottom;
+    animation: volIn 0.18s var(--ease-out) both;
+  }
+  .volcap :global(.slider.vertical) {
+    flex: 1 1 auto;
+  }
+  .bridge {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 100%;
+    height: calc(10px + clamp(4px, 1.4cqw, 10px) + 16px + 6px);
+  }
+  .pct {
+    font-size: 10.5px;
+    font-variant-numeric: tabular-nums;
+    color: var(--ch-text-subtle);
+  }
+  @keyframes volIn {
+    from {
+      opacity: 0;
+      transform: translateY(6px) scale(0.96);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
   }
   .vb {
     padding: 7px;
