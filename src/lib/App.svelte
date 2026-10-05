@@ -19,6 +19,7 @@
   import Icon from "$lib/ui/Icon.svelte";
   import ContextMenu, { type MenuItem } from "$lib/ui/ContextMenu.svelte";
   import { renderFallback, updateShell } from "$lib/shell";
+  import DefaultPrompt from "$lib/ui/DefaultPrompt.svelte";
 
   const MORPH_MS = 460;
   const IMAGE_EXT = /\.(jpe?g|png|webp|bmp|gif)$/i;
@@ -32,6 +33,18 @@
   let morph = $state<{ dir: "expand" | "collapse"; phase: "start" | "run"; from: Rect } | null>(null);
   let library: Library | undefined = $state();
   let menu = $state<{ x: number; y: number } | null>(null);
+  // The default-player prompt waits a moment after launch, and for a
+  // sleeve big enough to hold it.
+  let promptReady = $state(false);
+  const showPrompt = $derived(
+    promptReady &&
+      !app.defaultPromptDone &&
+      app.ui.defaultPrompt !== "never" &&
+      !!app.defaults?.registered &&
+      !app.defaults.isDefault &&
+      !morph &&
+      (app.mode === "library" || (app.ui.size !== "mini" && !app.flipped)),
+  );
   let menuRect = $state<Rect | null>(null);
 
   const S = $derived(SIZES[app.ui.size]);
@@ -192,6 +205,9 @@
     items.push(
       { kind: "sep" },
       { kind: "item", label: "Always on Top", checked: app.ui.onTop, action: () => app.setUi("onTop", !app.ui.onTop) },
+    ...(app.defaults?.registered && !app.defaults.isDefault
+      ? [{ kind: "item" as const, label: "Set as Default Player…", action: () => app.setAsDefault() }]
+      : []),
       { kind: "item", label: "Minimize", action: () => win.minimize() },
       { kind: "item", label: "Close", action: () => win.close() },
     );
@@ -456,6 +472,8 @@
       if (app.ui.pulse) app.cmd({ type: "setMeter", enabled: true });
       app.onStatus(b.status);
       app.guard(api.folders()).then((f) => { if (f) app.folders = f; });
+      app.refreshDefaults();
+      setTimeout(() => (promptReady = true), 2500);
       app.ready = true;
       // Show the window only once the first frame is painted (no flash).
       requestAnimationFrame(() => requestAnimationFrame(() => api.windowShow().catch(() => {})));
@@ -473,6 +491,10 @@
           if (app.mode === "player") app.setUi("playerPos", { x: f.x, y: f.y });
           else if (!f.maximized) app.setUi("libFrame", { x: f.x, y: f.y, w: f.w, h: f.h });
         }, 400);
+      }),
+      // Back from Windows Settings: see whether we became the default.
+      win.onFocusChanged(({ payload: focused }) => {
+        if (focused) app.refreshDefaults();
       }),
       win.onResized(() => {
         if (app.mode === "library" && !morph) libFrame = { w: window.innerWidth, h: window.innerHeight };
@@ -522,6 +544,17 @@
     <Sleeve inLibrary={app.mode === "library" && morph?.dir !== "collapse"} {drop} {pointerInside} onlibrary={expand} />
   </div>
 
+
+  {#if showPrompt}
+    <div
+      class="prompt"
+      style={app.mode === "library"
+        ? "right:20px;bottom:20px;width:340px"
+        : `left:${playerRect.x + 12}px;width:${playerRect.w - 24}px;bottom:${PLAYER_WIN - (playerRect.y + playerRect.h) + 12}px`}
+    >
+      <DefaultPrompt />
+    </div>
+  {/if}
 
   {#if menu}
     <ContextMenu
@@ -582,6 +615,10 @@
     position: absolute;
     transform-origin: 0 0;
     z-index: 2;
+  }
+  .prompt {
+    position: absolute;
+    z-index: 8;
   }
   .toast {
     position: absolute;

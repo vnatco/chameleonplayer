@@ -3,6 +3,7 @@
   import Segmented from "$lib/ui/Segmented.svelte";
   import Slider from "$lib/ui/Slider.svelte";
   import Toggle from "$lib/ui/Toggle.svelte";
+  import DefaultPlayerRow from "$lib/ui/DefaultPlayerRow.svelte";
   import { app, type Size } from "$lib/state.svelte";
 
   const glowLabel = $derived(app.ui.glow < 0.04 ? "Crisp" : app.ui.glow > 0.9 ? "Full Glow" : `${Math.round(app.ui.glow * 100)}%`);
@@ -50,6 +51,7 @@
         <Toggle on={!!app.ui[key]} {label} onchange={(v) => app.setUi(key, v)} />
       </div>
     {/each}
+    <DefaultPlayerRow />
   </div>
 </div>
 

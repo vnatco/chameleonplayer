@@ -231,6 +231,16 @@ export interface AlbumCoverResult {
   folderImage: string | null;
 }
 
+export interface DefaultStatus {
+  /** Registered with Windows by the installer (false for dev builds). */
+  registered: boolean;
+  scope: "machine" | "user" | null;
+  ours: string[];
+  others: string[];
+  /** Chameleon opens MP3 files. */
+  isDefault: boolean;
+}
+
 export interface Settings {
   volume: number;
   repeat: Repeat;
@@ -305,6 +315,8 @@ export const api = {
   openPaths: (paths: string[]) => invoke<number>("open_paths", { paths }),
 
   setUiSettings: (ui: Record<string, unknown>) => invoke<void>("settings_set_ui", { ui }),
+  defaultStatus: () => invoke<DefaultStatus>("default_status"),
+  openDefaultApps: () => invoke<void>("open_default_apps"),
 
   windowHit: (rects: Rect[]) => invoke<void>("window_hit", { rects }),
   windowFrame: () => invoke<Frame>("window_frame"),

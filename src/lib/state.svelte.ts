@@ -5,6 +5,7 @@ import {
   api,
   coverUrl,
   type Cover,
+  type DefaultStatus,
   type Folder,
   type Palette,
   type QueueItem,
@@ -47,6 +48,8 @@ export interface UiSettings {
   playerPos?: { x: number; y: number };
   libFrame?: { x: number; y: number; w: number; h: number };
   premute?: number;
+  /** "never" once the user picks Don't Ask Again on the default-player prompt. */
+  defaultPrompt?: "ask" | "never";
   /** Settings layout version, for one-time migrations. */
   v?: number;
 }
@@ -113,6 +116,33 @@ class AppState {
   libraryVersion = $state(0);
 
   toast = $state<{ id: number; text: string; error: boolean } | null>(null);
+  /** Default-player status; null until checked. */
+  defaults = $state<DefaultStatus | null>(null);
+  /** The prompt was answered (or dismissed) this session. */
+  defaultPromptDone = $state(false);
+  private awaitingDefault = false;
+
+  async refreshDefaults() {
+    const before = this.defaults?.isDefault;
+    const s = await api.defaultStatus().catch((e) => {
+      console.warn("default status failed", e);
+      return null;
+    });
+    if (!s) return;
+    this.defaults = s;
+    if (this.awaitingDefault && s.isDefault && !before) {
+      this.awaitingDefault = false;
+      this.notify("Chameleon Is Now Your Default Player");
+    }
+  }
+
+  /** Open Chameleon's page in Windows Settings; we recheck when the user
+   * comes back to the app. */
+  async setAsDefault() {
+    this.defaultPromptDone = true;
+    if ((await this.guard(api.openDefaultApps())) !== undefined) this.awaitingDefault = true;
+  }
+
   /** The volume capsule beside the sleeve. */
   volOpen = $state(false);
   private volTimer: ReturnType<typeof setTimeout> | undefined;

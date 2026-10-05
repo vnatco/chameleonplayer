@@ -1,7 +1,7 @@
 <script lang="ts">
   // Settings → Library (spec D7).
   import { open } from "@tauri-apps/plugin-dialog";
-  import { invoke } from "@tauri-apps/api/core";
+  import DefaultPlayerRow from "$lib/ui/DefaultPlayerRow.svelte";
   import { api, type CoverSource } from "$lib/api";
   import { app } from "$lib/state.svelte";
   import Segmented from "$lib/ui/Segmented.svelte";
@@ -90,8 +90,8 @@
 
   <section>
     <div class="h">Default Player</div>
-    <div class="subtle sub2">Make Chameleon open your music files. Windows asks you to confirm this in its Settings.</div>
-    <button class="btn secondary" onclick={() => app.guard(invoke("open_default_apps"))}>Make Chameleon the Default Player…</button>
+    <div class="subtle sub2">Windows asks you to confirm this on Chameleon's page in its Settings.</div>
+    <DefaultPlayerRow />
   </section>
 
   <section class="toggles">

@@ -1,5 +1,6 @@
 pub mod audio;
 pub mod commands;
+pub mod defaults;
 pub mod library;
 pub mod media;
 pub mod online;
@@ -92,6 +93,7 @@ pub fn run() {
             window::window_show,
             commands::shell_update,
             commands::open_default_apps,
+            commands::default_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Chameleon Player");

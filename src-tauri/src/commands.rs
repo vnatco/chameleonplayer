@@ -249,19 +249,21 @@ pub fn shell_update(state: State<'_, AppState>, shell: State<'_, crate::shell::S
     Ok(())
 }
 
-/// Open Windows' Default Apps page on Chameleon's entry, where the user can
-/// make it the default player (apps can't do that themselves on Windows 10/11).
+/// Whether Chameleon is registered and which audio types it opens.
 #[tauri::command]
-pub fn open_default_apps() -> Res<()> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let program_files = [std::env::var_os("ProgramFiles"), std::env::var_os("ProgramFiles(x86)")];
-    let machine = program_files.iter().flatten().any(|p| exe.starts_with(p));
-    let url = format!(
-        "ms-settings:defaultapps?registeredApp{}={}",
-        if machine { "Machine" } else { "User" },
-        urlencoding::encode("Chameleon Player")
-    );
-    tauri_plugin_opener::open_url(url, None::<&str>).map_err(|e| format!("Can't open Windows Settings: {e}"))
+pub async fn default_status() -> Res<crate::defaults::DefaultStatus> {
+    tauri::async_runtime::spawn_blocking(crate::defaults::status).await.map_err(|e| e.to_string())
+}
+
+/// Open Chameleon's own page in Settings > Default apps, where Windows shows
+/// a "Set default" button (apps can't set it themselves on Windows 10/11).
+#[tauri::command]
+pub async fn open_default_apps() -> Res<()> {
+    let status = tauri::async_runtime::spawn_blocking(crate::defaults::status).await.map_err(|e| e.to_string())?;
+    let Some(scope) = status.scope else {
+        return Err("Chameleon isn't installed, so Windows doesn't know about it yet. Install it with the installer, then set it as the default.".into());
+    };
+    tauri_plugin_opener::open_url(crate::defaults::settings_url(scope), None::<&str>).map_err(|e| format!("Can't open Windows Settings: {e}"))
 }
 
 // ---- Online covers ---------------------------------------------------------
