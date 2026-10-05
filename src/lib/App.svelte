@@ -167,7 +167,8 @@
   }
 
   // ---- Right-click menu ------------------------------------------------------
-  function onContextMenu(e: MouseEvent) {
+  let menuBounds = $state({ x0: 0, y0: 0, x1: 860, y1: 860 });
+  async function onContextMenu(e: MouseEvent) {
     const t = e.target as HTMLElement;
     // Text fields keep the system menu (cut, copy, paste).
     if (t.closest("input, textarea, [contenteditable]")) return;
@@ -177,7 +178,22 @@
       if (e.clientX < r.x || e.clientY < r.y || e.clientX >= r.x + r.w || e.clientY >= r.y + r.h) return;
     }
     menuRect = null;
-    menu = { x: e.clientX, y: e.clientY };
+    const x = e.clientX;
+    const y = e.clientY;
+    // The window may hang off the screen edge (its glow margin does when the
+    // sleeve sits near it); keep the menu on the visible part.
+    const f = await api.windowFrame().catch(() => null);
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    menuBounds = f
+      ? {
+          x0: Math.max(0, f.work.x - f.x),
+          y0: Math.max(0, f.work.y - f.y),
+          x1: Math.min(w, f.work.x + f.work.w - f.x),
+          y1: Math.min(h, f.work.y + f.work.h - f.y),
+        }
+      : { x0: 0, y0: 0, x1: w, y1: h };
+    menu = { x, y };
   }
   const menuItems = $derived.by((): MenuItem[] => {
     const player = app.mode === "player";
@@ -561,7 +577,7 @@
       x={menu.x}
       y={menu.y}
       items={menuItems}
-      bounds={{ w: window.innerWidth, h: window.innerHeight }}
+      bounds={menuBounds}
       onclose={() => {
         menu = null;
         menuRect = null;

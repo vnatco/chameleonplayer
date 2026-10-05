@@ -22,8 +22,9 @@
     x: number;
     y: number;
     items: MenuItem[];
-    /** Area the menu must stay inside (the window). */
-    bounds: { w: number; h: number };
+    /** The part of the window that is actually on screen, in window
+     * coordinates; the menu must stay inside it. */
+    bounds: { x0: number; y0: number; x1: number; y1: number };
     onclose: () => void;
     /** Reports the menu's rect so it can be made clickable. */
     onrect: (r: Rect) => void;
@@ -38,8 +39,14 @@
       await tick();
       const w = el.offsetWidth;
       const h = el.offsetHeight;
-      const px = x + w > bounds.w - 4 ? Math.max(4, x - w) : x;
-      const py = y + h > bounds.h - 4 ? Math.max(4, bounds.h - h - 4) : y;
+      const m = 4;
+      const { x0, y0, x1, y1 } = bounds;
+      // Open right/down from the pointer; flip left/up when that would leave
+      // the visible area; clamp as a last resort.
+      let px = x + w <= x1 - m ? x : x - w;
+      let py = y + h <= y1 - m ? y : y - h;
+      px = Math.max(x0 + m, Math.min(px, x1 - m - w));
+      py = Math.max(y0 + m, Math.min(py, y1 - m - h));
       pos = { x: px, y: py };
       onrect({ x: px, y: py, w, h });
       shown = true;
