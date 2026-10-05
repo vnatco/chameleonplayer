@@ -3,6 +3,7 @@
 
 pub mod covers;
 pub mod db;
+pub mod fallback;
 pub mod scan;
 
 use covers::CoverStore;
@@ -17,6 +18,7 @@ pub struct Library {
     scanning: AtomicBool,
     cancel: AtomicBool,
     cover_source: Mutex<scan::CoverSource>,
+    fallbacks: std::sync::OnceLock<fallback::Fallbacks>,
 }
 
 /// Clears the "scanning" flag however the scan ends.
@@ -40,6 +42,7 @@ impl Library {
             scanning: AtomicBool::new(false),
             cancel: AtomicBool::new(false),
             cover_source: Mutex::new(scan::CoverSource::default()),
+            fallbacks: std::sync::OnceLock::new(),
         })
     }
 
@@ -78,6 +81,42 @@ impl Library {
             }
         }
         self.with(|c| db::meta_set(c, "palette_version", crate::palette::VERSION))
+    }
+
+    /// Cache the built-in fallback covers (call once, off the UI thread).
+    pub fn prepare_fallbacks(&self) {
+        let f = fallback::Fallbacks::prepare(&self.store);
+        let _ = self.fallbacks.set(f);
+    }
+
+    /// Fallback cover and palette for music without art. `key` is the album
+    /// key (so an album shares one) or a path for loose files.
+    pub fn fallback_for(&self, key: &str) -> Option<(db::Cover, String)> {
+        self.fallbacks.get()?.pick(key).cloned()
+    }
+
+    fn track_key(t: &db::TrackRow) -> &str {
+        if t.album.trim().is_empty() { &t.path } else { &t.album_key }
+    }
+
+    /// Give rows without art their placeholder cover.
+    pub fn fill_track(&self, t: &mut db::TrackRow) {
+        if t.cover.is_none() {
+            t.cover = self.fallback_for(Self::track_key(t)).map(|(c, _)| c);
+        }
+    }
+    pub fn fill_album(&self, a: &mut db::AlbumRow) {
+        if a.cover.is_none() {
+            a.cover = self.fallback_for(&a.key).map(|(c, _)| c);
+        }
+    }
+    pub fn fill_named(&self, n: &mut db::NamedCount) {
+        if n.cover.is_none() {
+            n.cover = self.fallback_for(&n.name).map(|(c, _)| c);
+        }
+        if n.covers.is_empty() {
+            n.covers.extend(n.cover.clone());
+        }
     }
 
     /// Run a read or small write against the database.
@@ -263,17 +302,26 @@ impl Library {
         let path = &normalize_path(path);
         let path_str = path.to_string_lossy().into_owned();
         if let Some(t) = self.with(|c| db::track_by_path(c, &path_str))? {
-            let Some(cover) = t.cover else { return Ok(None) };
+            let Some(cover) = t.cover else { return Ok(self.fallback_for(Self::track_key(&t))) };
             let palette = self.with(|c| db::palette_json(c, &cover.hash))?.ok_or("Cover palette is missing from the library")?;
             return Ok(Some((cover, palette)));
         }
         let (_, embedded) = scan::read(path, true)?;
         let Some((bytes, _)) = scan::cover_bytes(path, embedded, self.cover_source()) else {
-            return Ok(None);
+            return Ok(self.fallback_for(&path_str));
         };
         let hash = covers::hash(&bytes);
         let nc = self.store.process(&hash, &bytes)?;
-        let cover = db::Cover { hash: nc.hash, full: nc.full, thumb: nc.thumb, width: nc.width, height: nc.height, edge: nc.edge, glow: nc.glow };
+        let cover = db::Cover {
+            hash: nc.hash,
+            full: nc.full,
+            thumb: nc.thumb,
+            width: nc.width,
+            height: nc.height,
+            edge: nc.edge,
+            glow: nc.glow,
+            placeholder: false,
+        };
         Ok(Some((cover, nc.palette_json)))
     }
 
@@ -285,7 +333,10 @@ impl Library {
             let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
             rows.collect::<db::Result<std::collections::HashSet<String>>>()
         }) {
-            Ok(keep) => self.store.sweep(&keep),
+            Ok(mut keep) => {
+                keep.extend(fallback::static_hashes());
+                self.store.sweep(&keep)
+            }
             Err(e) => log::warn!("Cover cache sweep skipped: {e}"),
         }
     }

@@ -70,7 +70,7 @@ class LibraryData {
   }
 
   get missingAlbums(): AlbumRow[] {
-    return (this.albums ?? []).filter((a) => !a.cover);
+    return (this.albums ?? []).filter((a) => !a.cover || a.cover.placeholder);
   }
 
   // ---- Missing covers -------------------------------------------------------

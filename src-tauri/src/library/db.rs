@@ -136,6 +136,8 @@ pub struct Cover {
     /// The cover's 1 px edge color and bottom glow color (`#rrggbb`).
     pub edge: String,
     pub glow: String,
+    /// A built-in fallback shown for music without art, not the music's own.
+    pub placeholder: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -330,6 +332,7 @@ fn cover_at(r: &Row, i: usize) -> Result<Option<Cover>> {
             height: r.get(i + 4)?,
             edge: r.get(i + 5)?,
             glow: r.get(i + 6)?,
+            placeholder: false,
         }),
         None => None,
     })

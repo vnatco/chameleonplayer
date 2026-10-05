@@ -139,28 +139,40 @@ pub fn library_is_scanning(state: State<'_, AppState>) -> bool {
 
 #[tauri::command]
 pub fn library_albums(state: State<'_, AppState>, artist: Option<String>, search: Option<String>) -> Res<Vec<db::AlbumRow>> {
-    state.library.with(|c| db::albums(c, artist.as_deref(), search.as_deref()))
+    let mut rows = state.library.with(|c| db::albums(c, artist.as_deref(), search.as_deref()))?;
+    rows.iter_mut().for_each(|a| state.library.fill_album(a));
+    Ok(rows)
 }
 
 #[tauri::command]
 pub fn library_artists(state: State<'_, AppState>, search: Option<String>) -> Res<Vec<db::NamedCount>> {
-    state.library.with(|c| db::artists(c, search.as_deref()))
+    let mut rows = state.library.with(|c| db::artists(c, search.as_deref()))?;
+    rows.iter_mut().for_each(|n| state.library.fill_named(n));
+    Ok(rows)
 }
 
 #[tauri::command]
 pub fn library_genres(state: State<'_, AppState>, search: Option<String>) -> Res<Vec<db::NamedCount>> {
-    state.library.with(|c| db::genres(c, search.as_deref()))
+    let mut rows = state.library.with(|c| db::genres(c, search.as_deref()))?;
+    rows.iter_mut().for_each(|n| state.library.fill_named(n));
+    Ok(rows)
 }
 
 #[tauri::command]
 pub fn library_tracks(state: State<'_, AppState>, filter: db::TrackFilter) -> Res<Vec<db::TrackRow>> {
-    state.library.with(|c| db::tracks(c, &filter))
+    let mut rows = state.library.with(|c| db::tracks(c, &filter))?;
+    rows.iter_mut().for_each(|t| state.library.fill_track(t));
+    Ok(rows)
 }
 
 #[tauri::command]
 pub fn library_track_by_path(state: State<'_, AppState>, path: PathBuf) -> Res<Option<db::TrackRow>> {
     let p = library::normalize_path(&path);
-    state.library.with(|c| db::track_by_path(c, &p.to_string_lossy()))
+    let mut row = state.library.with(|c| db::track_by_path(c, &p.to_string_lossy()))?;
+    if let Some(t) = row.as_mut() {
+        state.library.fill_track(t);
+    }
+    Ok(row)
 }
 
 // ---- Covers & palettes -----------------------------------------------------
@@ -466,7 +478,8 @@ pub async fn player_queue(state: State<'_, AppState>) -> Res<Vec<QueueItem>> {
             .into_iter()
             .map(|t| {
                 let path = t.path.to_string_lossy().into_owned();
-                if let Some(row) = library.with(|c| db::track_by_path(c, &path))? {
+                if let Some(mut row) = library.with(|c| db::track_by_path(c, &path))? {
+                    library.fill_track(&mut row);
                     return Ok(QueueItem {
                         path,
                         id: Some(row.id),

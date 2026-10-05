@@ -104,6 +104,13 @@ fn setup(app: &AppHandle) -> Result<(), String> {
         log::error!("palette upgrade failed: {e}");
     }
     library.sweep_cover_cache();
+    {
+        let lib = library.clone();
+        std::thread::Builder::new()
+            .name("fallback-covers".into())
+            .spawn(move || lib.prepare_fallbacks())
+            .map_err(|e| format!("Can't start fallback covers: {e}"))?;
+    }
     // Let the webview load cached covers (and nothing else) from disk.
     app.asset_protocol_scope()
         .allow_directory(data_dir.join("covers"), true)

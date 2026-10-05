@@ -27,7 +27,8 @@
 
   const path = $derived(app.now?.path ?? null);
   const dirty = $derived(cover.action !== "keep" || (Object.keys(empty) as (keyof Draft)[]).some((k) => draft[k] !== base[k]));
-  const currentArt = $derived(app.now?.cover ? coverUrl(app.now.cover.full) : null);
+  // A built-in fallback isn't the song's artwork, so the editor shows none.
+  const currentArt = $derived(app.now?.cover && !app.now.cover.placeholder ? coverUrl(app.now.cover.full) : null);
   const shownArt = $derived(cover.action === "keep" ? currentArt : cover.action === "remove" ? null : artUrl);
 
   async function load(p: string) {

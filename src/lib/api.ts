@@ -47,6 +47,8 @@ export interface Cover {
   /** `#rrggbb` edge border and bottom glow, for small thumbnails. */
   edge: string;
   glow: string;
+  /** A built-in fallback shown for music without art, not the music's own. */
+  placeholder: boolean;
 }
 
 export interface TrackRow {
