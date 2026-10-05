@@ -37,10 +37,14 @@
   function leave() {
     clearTimeout(idleTimer);
     hover = false;
+    app.volOut();
   }
   // A click-through window gets no pointerleave; the backend tells us.
   $effect(() => {
-    if (!pointerInside) leave();
+    if (!pointerInside) {
+      leave();
+      app.volOut(0);
+    }
   });
 
   const flipped = $derived(app.flipped && !inLibrary);

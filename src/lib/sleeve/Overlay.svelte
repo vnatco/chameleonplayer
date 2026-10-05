@@ -39,21 +39,15 @@
     </div>
   </div>
 
+  <!-- Edit and volume sit in their own side columns; the seek bar and the
+       transport sit between them, so the volume capsule can grow straight up
+       out of its button without touching any other control. -->
   <div class="foot">
-    {#if app.volOpen}
-      <!-- Above the seek bar, over the art only; the bridge spans the seek row
-           so moving up from the speaker button doesn't close it. -->
-      <div class="volcap" role="group" aria-label="Volume" onmouseenter={() => app.volIn()} onmouseleave={() => app.volOut()} onwheel={wheel}>
-        <span class="pct">{Math.round(vol * 100)}</span>
-        <Slider vertical value={vol} label="Volume" ring="var(--ch-surface-2)" wheel={false} oninput={(v) => app.setVolume(v)} />
-        <div class="bridge"></div>
-      </div>
-    {/if}
-    <Seek />
-    <div class="row">
-      <div class="left">
-        <button class="ib" onclick={() => app.flip("edit")} aria-label="Edit Tags and Artwork" title="Edit Tags"><Icon name="edit" /></button>
-      </div>
+    <div class="side">
+      <button class="ib" onclick={() => app.flip("edit")} aria-label="Edit Tags and Artwork" title="Edit Tags"><Icon name="edit" /></button>
+    </div>
+    <div class="mid">
+      <Seek />
       <div class="transport">
         <button class="ib t" onclick={() => app.prev()} aria-label="Previous" title="Previous"><Icon name="prev" stroke={1.8} /></button>
         <button class="play" onclick={() => app.toggle()} aria-label={app.playing ? "Pause" : "Play"} title="Play / Pause (Space)">
@@ -61,13 +55,16 @@
         </button>
         <button class="ib t" onclick={() => app.next()} aria-label="Next" title="Next (N)"><Icon name="next" stroke={1.8} /></button>
       </div>
-      <div class="right">
-        <!-- Only the pill itself reacts: the icon, and the slider once it's out. -->
-        <div class="vol" role="group" aria-label="Volume" onmouseenter={() => app.volIn()} onmouseleave={() => app.volOut()} onwheel={wheel}>
-          <button class="ib vb" class:open={app.volOpen} onclick={() => app.toggleMute()} onfocus={() => app.volIn()} onblur={() => app.volOut()} aria-label={vol > 0 ? "Mute" : "Unmute"} title="Volume (Scroll to Adjust)">
-            <Icon name={vol > 0 ? "volume" : "mute"} />
-          </button>
+    </div>
+    <div class="side">
+      <div class="vol" class:open={app.volOpen} role="group" aria-label="Volume" onmouseenter={() => app.volIn()} onmouseleave={() => app.volOut()} onwheel={wheel}>
+        <div class="cap">
+          <span class="pct">{Math.round(vol * 100)}</span>
+          <Slider vertical value={vol} label="Volume" ring="var(--ch-surface-2)" wheel={false} oninput={(v) => app.setVolume(v)} />
         </div>
+        <button class="ib vb" onclick={() => app.toggleMute()} onfocus={() => app.volIn()} onblur={() => app.volOut()} aria-label={vol > 0 ? "Mute" : "Unmute"} title="Volume (Scroll to Adjust)">
+          <Icon name={vol > 0 ? "volume" : "mute"} />
+        </button>
       </div>
     </div>
   </div>
@@ -143,28 +140,33 @@
     padding: 7px;
   }
   .foot {
+    --play: clamp(40px, 13.5cqw, 64px);
     position: absolute;
     left: 0;
     right: 0;
     bottom: 0;
     padding: 0 clamp(12px, 4cqw, 22px) clamp(8px, 2.6cqw, 16px);
-    display: flex;
-    flex-direction: column;
-    gap: clamp(4px, 1.4cqw, 10px);
+    display: grid;
+    grid-template-columns: 32px minmax(0, 1fr) 32px;
+    column-gap: clamp(6px, 2cqw, 12px);
+    align-items: end;
     text-shadow: var(--ch-text-shadow);
     font-size: clamp(11px, 3.2cqw, 14px);
   }
-  .row {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
-    align-items: center;
-  }
-  .left {
+  .mid {
     display: flex;
+    flex-direction: column;
+    gap: clamp(4px, 1.4cqw, 10px);
+    min-width: 0;
+  }
+  /* Side buttons line up with the middle of the transport row. */
+  .side {
+    padding-bottom: calc((var(--play) - 32px) / 2);
   }
   .transport {
     display: flex;
     align-items: center;
+    justify-content: center;
     gap: clamp(4px, 2cqw, 14px);
   }
   .t {
@@ -173,8 +175,8 @@
     padding: clamp(7px, 2.6cqw, 11px);
   }
   .play {
-    width: clamp(40px, 13.5cqw, 64px);
-    height: clamp(40px, 13.5cqw, 64px);
+    width: var(--play);
+    height: var(--play);
     border: 0;
     border-radius: 4px;
     background: var(--ch-accent);
@@ -187,64 +189,67 @@
   .play:hover {
     filter: brightness(1.08);
   }
-  .right {
-    position: relative;
-    display: flex;
-    justify-content: flex-end;
-    align-items: center;
-  }
+  /* The speaker button stretches up into a capsule: one shape, anchored on
+     the icon. */
   .vol {
-    display: flex;
-  }
-  .volcap {
-    position: absolute;
-    right: clamp(12px, 4cqw, 22px);
-    bottom: calc(100% + 10px);
+    position: relative;
     width: 32px;
-    height: clamp(96px, 36cqw, 150px);
+    height: 32px;
+  }
+  .cap {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 32px;
     display: flex;
     flex-direction: column;
     align-items: center;
     gap: 8px;
-    padding: 12px 0 14px;
+    padding: 0;
     border-radius: 16px;
+    overflow: hidden;
+    background: transparent;
+    text-shadow: none;
+    transition:
+      height 0.2s var(--ease-out),
+      background-color 0.16s,
+      box-shadow 0.16s;
+  }
+  .cap > :global(*) {
+    opacity: 0;
+    visibility: hidden;
+    transition:
+      opacity 0.12s,
+      visibility 0s 0.12s;
+  }
+  .vol.open .cap {
+    height: clamp(120px, 42cqw, 170px);
+    padding: 12px 0 40px;
     background: var(--ch-surface-2);
     box-shadow:
       0 0 0 1px var(--ch-hairline),
       0 10px 26px rgb(0 0 0 / 0.35);
-    text-shadow: none;
-    transform-origin: center bottom;
-    animation: volIn 0.18s var(--ease-out) both;
   }
-  .volcap :global(.slider.vertical) {
+  .vol.open .cap > :global(*) {
+    opacity: 1;
+    visibility: visible;
+    transition: opacity 0.16s 0.06s;
+  }
+  .cap :global(.slider.vertical) {
     flex: 1 1 auto;
-  }
-  .bridge {
-    position: absolute;
-    left: 0;
-    right: 0;
-    top: 100%;
-    height: calc(10px + clamp(4px, 1.4cqw, 10px) + 16px + 6px);
   }
   .pct {
     font-size: 10.5px;
     font-variant-numeric: tabular-nums;
     color: var(--ch-text-subtle);
   }
-  @keyframes volIn {
-    from {
-      opacity: 0;
-      transform: translateY(6px) scale(0.96);
-    }
-    to {
-      opacity: 1;
-      transform: none;
-    }
-  }
   .vb {
+    position: relative;
     padding: 7px;
+    border-radius: 16px;
   }
-  .vb.open {
-    background: var(--ch-hairline);
+  .vol.open .vb:hover {
+    background: transparent;
   }
 </style>
