@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-const USER_AGENT: &str = concat!("ChameleonPlayer/", env!("CARGO_PKG_VERSION"), " ( https://github.com/vnatco/chameleon_player )");
+const USER_AGENT: &str = concat!("ChameleonPlayer/", env!("CARGO_PKG_VERSION"), " ( https://github.com/vnatco/chameleonplayer )");
 const MB_GAP: Duration = Duration::from_millis(1100);
 const MAX_IMAGE_BYTES: u64 = 30 * 1024 * 1024;
 

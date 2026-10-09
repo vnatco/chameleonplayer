@@ -57,7 +57,7 @@
       "icons/icon.ico"
     ],
     "publisher": "vnat.co",
-    "homepage": "https://github.com/vnatco/chameleon_player",
+    "homepage": "https://github.com/vnatco/chameleonplayer",
     "copyright": "Copyright 2026 Vladimer Natchkepia",
     "longDescription": "A cover-first music player for Windows. The album cover is the player, and the whole interface takes its colors from the artwork.",
     "fileAssociations": [
