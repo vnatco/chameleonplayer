@@ -1,6 +1,6 @@
 {
   "name": "chameleon",
-  "version": "0.1.1",
+  "version": "1.0.0",
   "description": "Cover-first, chameleon music player for Windows",
   "type": "module",
   "scripts": {

@@ -2,8 +2,6 @@
 
 A cover-first music player for Windows. The album cover is the player, and the whole interface takes its colors from the artwork: each edge of the cover lights up the desktop around it, and the app changes color with every track.
 
-> **Status:** rewrite in progress. Playback, library, covers, tag editing and the new interface work; an installer is not set up yet.
->
 > The original 2017 WinForms version lives on the [`legacy`](../../tree/legacy) branch and the `v1-legacy` tag.
 
 ## Features
@@ -19,6 +17,12 @@ A cover-first music player for Windows. The album cover is the player, and the w
 - **Windows integration.** Media keys and the Windows media overlay, a tray icon in the current accent color, a taskbar thumbnail that shows the cover with previous / play / next buttons, single instance, and files or folders opened from Explorer or dropped on the window.
 
 Opus, APE, WMA, WavPack, Musepack and DSD files are not supported yet; scans report how many were skipped.
+
+## Install
+
+Download the installer from [Releases](../../releases). It installs for all users by default, or just for you if you choose. Chameleon Player registers itself for MP3, M4A, FLAC, Ogg, WAV, AAC and AIFF files and offers to become the default music player.
+
+The app only goes online when you ask it to: Find Online and Find All Online contact MusicBrainz and the Cover Art Archive. It makes no other network connections.
 
 ## Building
 
